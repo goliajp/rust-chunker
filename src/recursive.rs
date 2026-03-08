@@ -1,4 +1,5 @@
 use crate::Chunk;
+use crate::byte_offset_of;
 use tiktoken::CoreBpe;
 
 /// default separators in priority order: paragraph → line → sentence → word
@@ -264,25 +265,36 @@ fn split_by_tokens(
     let tokens = encoder.encode(text);
     let mut chunks = Vec::new();
 
-    // compute byte length of each token for accurate offset tracking
+    // compute cumulative byte offsets via prefix sum for O(1) per-chunk lookup
     let token_byte_lens: Vec<usize> = tokens.iter().map(|&t| encoder.decode(&[t]).len()).collect();
+    let mut prefix_sums = Vec::with_capacity(token_byte_lens.len() + 1);
+    prefix_sums.push(0usize);
+    for &len in &token_byte_lens {
+        prefix_sums.push(prefix_sums.last().unwrap() + len);
+    }
 
     let mut start = 0;
 
     while start < tokens.len() {
         let end = (start + max_tokens).min(tokens.len());
-        let chunk_tokens = &tokens[start..end];
-        let content = String::from_utf8_lossy(&encoder.decode(chunk_tokens)).into_owned();
 
-        let byte_start: usize = token_byte_lens[..start].iter().sum();
-        let byte_end: usize = token_byte_lens[..end].iter().sum();
+        let byte_start = prefix_sums[start];
+        let byte_end = prefix_sums[end];
+
+        // prefer slicing the original text to preserve valid UTF-8 without lossy conversion
+        let content = text
+            .get(byte_start..byte_end)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                String::from_utf8_lossy(&encoder.decode(&tokens[start..end])).into_owned()
+            });
 
         chunks.push(Chunk {
             content,
             index: chunks.len(),
             start_byte: text_offset + byte_start,
             end_byte: text_offset + byte_end,
-            token_count: chunk_tokens.len(),
+            token_count: end - start,
             section: section.clone(),
         });
 
@@ -328,17 +340,6 @@ fn take_suffix_tokens(text: &str, n: usize, encoder: &CoreBpe) -> String {
         start += 1;
     }
     text[start..].to_string()
-}
-
-/// find byte offset of a substring within the original text using pointer arithmetic
-fn byte_offset_of(sub: &str, parent: &str) -> usize {
-    let sub_ptr = sub.as_ptr() as usize;
-    let parent_ptr = parent.as_ptr() as usize;
-    debug_assert!(
-        sub_ptr >= parent_ptr && sub_ptr <= parent_ptr + parent.len(),
-        "substring pointer is not within parent string bounds"
-    );
-    sub_ptr.saturating_sub(parent_ptr)
 }
 
 #[cfg(test)]

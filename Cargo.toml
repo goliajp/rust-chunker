@@ -16,11 +16,10 @@ readme = "README.md"
 [dependencies]
 tiktoken = { path = "../tiktoken", version = "3.1" }
 embedrs = { path = "../embedrs", version = "0.3", optional = true }
-tokio = { version = "1", features = ["sync"], optional = true }
 
 [features]
 default = []
-semantic = ["dep:embedrs", "dep:tokio"]
+semantic = ["dep:embedrs"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

@@ -1,4 +1,5 @@
 use crate::Chunk;
+use crate::byte_offset_of;
 use crate::recursive::split_recursive;
 use tiktoken::CoreBpe;
 
@@ -55,11 +56,11 @@ fn extract_sections(text: &str) -> Vec<(Option<String>, String, usize)> {
             }
             current_header = Some(trimmed.trim_end().to_string());
             current_content = String::new();
-            let line_offset = byte_offset_in(line, text);
+            let line_offset = byte_offset_of(line, text);
             current_offset = line_offset + line.len();
         } else {
             if current_content.is_empty() {
-                current_offset = byte_offset_in(line, text);
+                current_offset = byte_offset_of(line, text);
             }
             current_content.push_str(line);
         }
@@ -76,12 +77,6 @@ fn extract_sections(text: &str) -> Vec<(Option<String>, String, usize)> {
 fn is_header(line: &str) -> bool {
     let hashes = line.bytes().take_while(|&b| b == b'#').count();
     (1..=6).contains(&hashes) && line.as_bytes().get(hashes) == Some(&b' ')
-}
-
-fn byte_offset_in(sub: &str, parent: &str) -> usize {
-    let sub_ptr = sub.as_ptr() as usize;
-    let parent_ptr = parent.as_ptr() as usize;
-    sub_ptr.saturating_sub(parent_ptr)
 }
 
 #[cfg(test)]
