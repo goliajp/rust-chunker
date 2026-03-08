@@ -76,9 +76,8 @@ fn split_sentences(text: &str) -> Vec<Sentence<'_>> {
 
     let terminators = [". ", "! ", "? ", ".\n", "!\n", "?\n"];
 
-    let bytes = text.as_bytes();
     let mut i = 0;
-    while i < bytes.len() {
+    while i < text.len() {
         let mut found = false;
         for term in &terminators {
             if text[i..].starts_with(term) {
@@ -97,7 +96,8 @@ fn split_sentences(text: &str) -> Vec<Sentence<'_>> {
             }
         }
         if !found {
-            i += 1;
+            // advance by one character, not one byte (multi-byte UTF-8 safety)
+            i += text[i..].chars().next().map_or(1, |c| c.len_utf8());
         }
     }
 
@@ -260,6 +260,32 @@ mod tests {
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].len(), 2); // a, b
         assert_eq!(groups[1].len(), 1); // c
+    }
+
+    #[test]
+    fn split_sentences_cjk_no_panic() {
+        // must not panic on multi-byte UTF-8 characters (regression test)
+        let sentences = split_sentences("这是第一句。第二句在这里。最后一句。");
+        // CJK full-width period is not in the ASCII terminator list,
+        // so this returns 1 sentence — but must not panic
+        assert!(!sentences.is_empty());
+        for s in &sentences {
+            assert!(!s.text.contains('\u{FFFD}'));
+        }
+    }
+
+    #[test]
+    fn split_sentences_cjk_with_ascii_terminators() {
+        // CJK text with ASCII-style terminators works correctly
+        let sentences = split_sentences("这是第一句. 第二句在这里. 最后一句.");
+        assert_eq!(sentences.len(), 3);
+    }
+
+    #[test]
+    fn split_sentences_japanese_no_panic() {
+        // must not panic on Japanese multi-byte characters
+        let sentences = split_sentences("最初の文です。次の文です。最後。");
+        assert!(!sentences.is_empty());
     }
 
     #[test]

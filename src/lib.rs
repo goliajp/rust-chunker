@@ -67,6 +67,17 @@ mod semantic;
 
 pub use chunk::Chunk;
 
+/// find byte offset of a substring within the parent string using pointer arithmetic
+pub(crate) fn byte_offset_of(sub: &str, parent: &str) -> usize {
+    let sub_ptr = sub.as_ptr() as usize;
+    let parent_ptr = parent.as_ptr() as usize;
+    debug_assert!(
+        sub_ptr >= parent_ptr && sub_ptr <= parent_ptr + parent.len(),
+        "substring pointer is not within parent string bounds"
+    );
+    sub_ptr.saturating_sub(parent_ptr)
+}
+
 /// Error types for chunkedrs operations.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -179,6 +190,8 @@ impl<'a> ChunkBuilder<'a> {
     /// This is independent of [`.encoding()`](ChunkBuilder::encoding). If both are
     /// set, `encoding` takes precedence.
     ///
+    /// If the model name is not recognized, falls back to `o200k_base` silently.
+    ///
     /// ```rust
     /// let chunks = chunkedrs::chunk("hello world").model("gpt-4o").split();
     /// ```
@@ -191,6 +204,8 @@ impl<'a> ChunkBuilder<'a> {
     ///
     /// Use this when you know the exact encoding (e.g. `"cl100k_base"`, `"o200k_base"`).
     /// Takes precedence over [`.model()`](ChunkBuilder::model) if both are set.
+    ///
+    /// If the encoding name is not recognized, falls back to `o200k_base` silently.
     ///
     /// ```rust
     /// let chunks = chunkedrs::chunk("hello world").encoding("cl100k_base").split();
@@ -476,11 +491,28 @@ mod tests {
     #[test]
     fn model_and_encoding_are_independent() {
         // encoding takes precedence over model
-        let builder = chunk("test").model("gpt-4o").encoding("cl100k_base");
-        let enc = builder.resolve_encoder();
-        // cl100k_base should be used, not o200k_base (which gpt-4o maps to)
-        let count = enc.count("hello world");
-        assert!(count > 0);
+        // gpt-4o uses o200k_base, but we explicitly set cl100k_base
+        let enc_cl100k = chunk("test")
+            .model("gpt-4o")
+            .encoding("cl100k_base")
+            .resolve_encoder();
+        let enc_o200k = chunk("test").model("gpt-4o").resolve_encoder();
+
+        // verify they are different encoders by checking that at least one of
+        // several test strings produces different token counts
+        let test_texts = [
+            "hello_world_123_test",
+            "foo::bar::baz::qux",
+            "αβγδεζηθ",
+            "1234567890",
+        ];
+        let any_different = test_texts
+            .iter()
+            .any(|t| enc_cl100k.count(t) != enc_o200k.count(t));
+        assert!(
+            any_different,
+            "cl100k_base and o200k_base should produce different token counts for at least one test string"
+        );
     }
 
     #[test]
