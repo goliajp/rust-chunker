@@ -5,7 +5,10 @@ use tiktoken::CoreBpe;
 /// split markdown text by headers first, then apply recursive splitting within each section.
 ///
 /// headers are detected by lines starting with `#` (up to 6 levels).
-/// each resulting chunk carries the section header in its metadata.
+/// each resulting chunk carries the section header in its `section` metadata field.
+///
+/// note: header lines are stored in metadata only, not in chunk `content`.
+/// joining all chunk contents will not reproduce header lines from the original document.
 pub(crate) fn split_markdown(
     text: &str,
     max_tokens: usize,
@@ -189,6 +192,19 @@ mod tests {
         let chunks = split_markdown(text, 100, 0, enc);
         assert_eq!(chunks.len(), 1);
         assert!(chunks[0].content.contains("Hello world."));
+    }
+
+    #[test]
+    fn split_markdown_with_overlap() {
+        let enc = encoder();
+        let long_content = "Word. ".repeat(200);
+        let text = format!("# Section\n\n{long_content}");
+        let chunks = split_markdown(&text, 20, 5, enc);
+        assert!(chunks.len() >= 2);
+        for chunk in &chunks {
+            assert!(chunk.token_count <= 20);
+            assert_eq!(chunk.section.as_deref(), Some("# Section"));
+        }
     }
 
     #[test]

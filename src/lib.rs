@@ -52,10 +52,10 @@
 //! With the `semantic` feature enabled, split at meaning boundaries using embeddings:
 //!
 //! ```rust,ignore
-//! let client = embedrs::local();
+//! let client = embedrs::openai("sk-...");
 //! let chunks = chunkedrs::chunk("your long text here...")
 //!     .semantic(&client)
-//!     .split()
+//!     .split_async()
 //!     .await?;
 //! ```
 
@@ -110,7 +110,8 @@ pub fn chunk(text: &str) -> ChunkBuilder<'_> {
         text,
         max_tokens: 512,
         overlap: 0,
-        encoding: None,
+        model_name: None,
+        encoding_name: None,
         strategy: Strategy::Recursive,
         #[cfg(feature = "semantic")]
         semantic_client: None,
@@ -131,12 +132,13 @@ enum Strategy {
 /// Builder for configuring text chunking.
 ///
 /// Created by [`chunk()`]. Chain methods to configure, then call [`.split()`](ChunkBuilder::split)
-/// (sync) or [`.split().await`](ChunkBuilder::split_async) (semantic).
+/// (sync) or [`.split_async()`](ChunkBuilder::split_async) (semantic).
 pub struct ChunkBuilder<'a> {
     text: &'a str,
     max_tokens: usize,
     overlap: usize,
-    encoding: Option<&'a str>,
+    model_name: Option<&'a str>,
+    encoding_name: Option<&'a str>,
     strategy: Strategy,
     #[cfg(feature = "semantic")]
     semantic_client: Option<&'a embedrs::Client>,
@@ -174,23 +176,27 @@ impl<'a> ChunkBuilder<'a> {
     /// Uses [`tiktoken::encoding_for_model`] to find the right encoding.
     /// Default: `o200k_base` (GPT-4o, GPT-4-turbo).
     ///
+    /// This is independent of [`.encoding()`](ChunkBuilder::encoding). If both are
+    /// set, `encoding` takes precedence.
+    ///
     /// ```rust
     /// let chunks = chunkedrs::chunk("hello world").model("gpt-4o").split();
     /// ```
     pub fn model(mut self, model: &'a str) -> Self {
-        self.encoding = Some(model);
+        self.model_name = Some(model);
         self
     }
 
     /// Set the tiktoken encoding name directly.
     ///
     /// Use this when you know the exact encoding (e.g. `"cl100k_base"`, `"o200k_base"`).
+    /// Takes precedence over [`.model()`](ChunkBuilder::model) if both are set.
     ///
     /// ```rust
     /// let chunks = chunkedrs::chunk("hello world").encoding("cl100k_base").split();
     /// ```
     pub fn encoding(mut self, encoding: &'a str) -> Self {
-        self.encoding = Some(encoding);
+        self.encoding_name = Some(encoding);
         self
     }
 
@@ -199,6 +205,10 @@ impl<'a> ChunkBuilder<'a> {
     /// Splits at `#` header boundaries first, then applies recursive splitting
     /// within each section. Each chunk's [`Chunk::section`] field contains the
     /// header it belongs to.
+    ///
+    /// Note: header lines themselves are stored in `section` metadata, not in
+    /// chunk `content`. This means joining all chunk contents will not reproduce
+    /// the header lines from the original document.
     ///
     /// ```rust
     /// let md = "# Title\n\nContent here.\n";
@@ -217,12 +227,13 @@ impl<'a> ChunkBuilder<'a> {
     /// a new chunk begins.
     ///
     /// Requires the `semantic` feature and an [`embedrs::Client`].
+    /// Must use [`.split_async()`](ChunkBuilder::split_async) instead of `.split()`.
     ///
     /// ```rust,ignore
-    /// let client = embedrs::local();
+    /// let client = embedrs::openai("sk-...");
     /// let chunks = chunkedrs::chunk(text)
     ///     .semantic(&client)
-    ///     .split()
+    ///     .split_async()
     ///     .await?;
     /// ```
     #[cfg(feature = "semantic")]
@@ -244,6 +255,9 @@ impl<'a> ChunkBuilder<'a> {
 
     /// Split the text synchronously. Works with recursive and markdown strategies.
     ///
+    /// Panics if called with the semantic strategy — use
+    /// [`.split_async()`](ChunkBuilder::split_async) instead.
+    ///
     /// ```rust
     /// let chunks = chunkedrs::chunk("hello world").split();
     /// assert_eq!(chunks[0].content, "hello world");
@@ -264,14 +278,8 @@ impl<'a> ChunkBuilder<'a> {
             }
             #[cfg(feature = "semantic")]
             Strategy::Semantic => {
-                // fallback to recursive for sync call
-                recursive::split_recursive(
-                    self.text,
-                    0,
-                    self.max_tokens,
-                    self.overlap,
-                    encoder,
-                    &None,
+                panic!(
+                    "semantic strategy requires async: use .split_async().await instead of .split()"
                 )
             }
         }
@@ -309,12 +317,20 @@ impl<'a> ChunkBuilder<'a> {
 
     fn resolve_encoder(&self) -> &'static tiktoken::CoreBpe {
         let default = || tiktoken::get_encoding("o200k_base").expect("o200k_base encoding");
-        match self.encoding {
-            Some(name) => tiktoken::get_encoding(name)
-                .or_else(|| tiktoken::encoding_for_model(name))
-                .unwrap_or_else(default),
-            None => default(),
+
+        // encoding name takes precedence over model name
+        if let Some(name) = self.encoding_name {
+            return tiktoken::get_encoding(name).unwrap_or_else(default);
         }
+
+        // try model name
+        if let Some(model) = self.model_name {
+            return tiktoken::encoding_for_model(model)
+                .or_else(|| tiktoken::get_encoding(model))
+                .unwrap_or_else(default);
+        }
+
+        default()
     }
 }
 
@@ -384,7 +400,6 @@ mod tests {
         let md = "# Title\n\nSome content.\n\n## Section\n\nMore content.\n";
         let chunks = chunk(md).markdown().split();
         assert!(chunks.len() >= 2);
-        // first chunk should be from the Title section
         assert_eq!(chunks[0].section.as_deref(), Some("# Title"));
     }
 
@@ -422,7 +437,6 @@ mod tests {
     fn chunk_preserves_all_content() {
         let text = "First paragraph.\n\nSecond paragraph.\n\nThird paragraph.";
         let chunks = chunk(text).max_tokens(5).split();
-        // all chunks concatenated should contain all original words
         let combined: String = chunks
             .iter()
             .map(|c| c.content.as_str())
@@ -456,7 +470,30 @@ mod tests {
     fn resolve_encoder_unknown_falls_back() {
         let builder = chunk("test").model("nonexistent-model-xyz");
         let enc = builder.resolve_encoder();
-        // should fall back to o200k_base
+        assert!(enc.count("hello") > 0);
+    }
+
+    #[test]
+    fn model_and_encoding_are_independent() {
+        // encoding takes precedence over model
+        let builder = chunk("test").model("gpt-4o").encoding("cl100k_base");
+        let enc = builder.resolve_encoder();
+        // cl100k_base should be used, not o200k_base (which gpt-4o maps to)
+        let count = enc.count("hello world");
+        assert!(count > 0);
+    }
+
+    #[test]
+    fn encoding_only_without_model() {
+        let builder = chunk("test").encoding("cl100k_base");
+        let enc = builder.resolve_encoder();
+        assert!(enc.count("hello") > 0);
+    }
+
+    #[test]
+    fn model_only_without_encoding() {
+        let builder = chunk("test").model("gpt-4o");
+        let enc = builder.resolve_encoder();
         assert!(enc.count("hello") > 0);
     }
 }
