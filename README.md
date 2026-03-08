@@ -1,5 +1,11 @@
 # chunkedrs
 
+[![Crates.io](https://img.shields.io/crates/v/chunkedrs?style=flat-square&logo=rust)](https://crates.io/crates/chunkedrs)
+[![docs.rs](https://img.shields.io/docsrs/chunkedrs?style=flat-square&logo=docs.rs)](https://docs.rs/chunkedrs)
+[![License](https://img.shields.io/crates/l/chunkedrs?style=flat-square)](LICENSE)
+
+**English** | [简体中文](README.zh-CN.md) | [日本語](README.ja.md)
+
 AI-native text chunking for Rust — split long documents into token-accurate pieces for embedding and retrieval.
 
 Built on [tiktoken](https://crates.io/crates/tiktoken) for precise token counting. Every chunk is guaranteed to respect your token budget.

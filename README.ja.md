@@ -1,5 +1,11 @@
 # chunkedrs
 
+[![Crates.io](https://img.shields.io/crates/v/chunkedrs?style=flat-square&logo=rust)](https://crates.io/crates/chunkedrs)
+[![docs.rs](https://img.shields.io/docsrs/chunkedrs?style=flat-square&logo=docs.rs)](https://docs.rs/chunkedrs)
+[![License](https://img.shields.io/crates/l/chunkedrs?style=flat-square)](LICENSE)
+
+[English](README.md) | [简体中文](README.zh-CN.md) | **日本語**
+
 AI ネイティブなテキストチャンキング — 長いドキュメントをトークン精度で分割し、embedding と検索に最適化。
 
 [tiktoken](https://crates.io/crates/tiktoken) による正確なトークンカウント。すべてのチャンクがトークン上限を厳守します。

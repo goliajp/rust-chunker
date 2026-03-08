@@ -1,5 +1,11 @@
 # chunkedrs
 
+[![Crates.io](https://img.shields.io/crates/v/chunkedrs?style=flat-square&logo=rust)](https://crates.io/crates/chunkedrs)
+[![docs.rs](https://img.shields.io/docsrs/chunkedrs?style=flat-square&logo=docs.rs)](https://docs.rs/chunkedrs)
+[![License](https://img.shields.io/crates/l/chunkedrs?style=flat-square)](LICENSE)
+
+[English](README.md) | **简体中文** | [日本語](README.ja.md)
+
 面向 AI 的 Rust 文本分块工具 — 将长文档精确分割为 token 级别的片段，用于 embedding 和检索。
 
 基于 [tiktoken](https://crates.io/crates/tiktoken) 精确计数 token。每个分块严格保证不超过你设定的 token 上限。
