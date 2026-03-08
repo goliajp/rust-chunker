@@ -1,0 +1,26 @@
+[package]
+name = "chunkedrs"
+version = "1.0.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "AI-native text chunking — recursive, markdown-aware, and semantic splitting with token-accurate boundaries"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+documentation = "https://docs.rs/chunkedrs"
+keywords = ["chunking", "rag", "text-splitting", "tokenizer", "ai"]
+categories = ["text-processing"]
+readme = "README.md"
+
+[dependencies]
+tiktoken = { path = "../tiktoken", version = "3.1" }
+embedrs = { path = "../embedrs", version = "0.3", optional = true }
+tokio = { version = "1", features = ["sync"], optional = true }
+
+[features]
+default = []
+semantic = ["dep:embedrs", "dep:tokio"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
