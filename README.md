@@ -3,18 +3,38 @@
 [![Crates.io](https://img.shields.io/crates/v/chunkedrs?style=flat-square&logo=rust)](https://crates.io/crates/chunkedrs)
 [![docs.rs](https://img.shields.io/docsrs/chunkedrs?style=flat-square&logo=docs.rs)](https://docs.rs/chunkedrs)
 [![License](https://img.shields.io/crates/l/chunkedrs?style=flat-square)](LICENSE)
+[![Downloads](https://img.shields.io/crates/d/chunkedrs?style=flat-square)](https://crates.io/crates/chunkedrs)
+[![MSRV](https://img.shields.io/badge/MSRV-1.94-blue?style=flat-square)](https://www.rust-lang.org)
 
 **English** | [简体中文](README.zh-CN.md) | [日本語](README.ja.md)
 
-AI-native text chunking for Rust — split long documents into token-accurate pieces for embedding and retrieval.
+Token-accurate text chunking for RAG pipelines — recursive, markdown-aware, and semantic splitting. Built on [tiktoken](https://crates.io/crates/tiktoken), the fastest pure-Rust BPE tokenizer.
 
-Built on [tiktoken](https://crates.io/crates/tiktoken) for precise token counting. Every chunk is guaranteed to respect your token budget.
+## Highlights
+
+- **Token-accurate** — every chunk is guaranteed within your token budget, not character-approximate
+- **3 strategies** — recursive (fast, general), markdown-aware (preserves headers), semantic (embedding-based breakpoints)
+- **Rich metadata** — byte offsets, token counts, and section headers on every chunk
+- **Overlap** — configurable token overlap between chunks for retrieval context preservation
+- **Any tokenizer** — auto-detect from model name (`gpt-4o`, `claude`, `llama`) or specify encoding directly
+- **Built on tiktoken** — the fastest pure-Rust BPE tokenizer with 9 encodings across all major LLMs
 
 ## Why chunkedrs?
 
 RAG pipelines need text split into chunks that fit model context windows. Naive splitting (by character count or fixed size) breaks mid-word, mid-sentence, or mid-paragraph — destroying meaning and hurting retrieval quality.
 
-chunkedrs splits at **semantic boundaries** (paragraphs → sentences → words) while enforcing **exact token limits**. No chunk ever exceeds `max_tokens`.
+chunkedrs splits at **semantic boundaries** (paragraphs, sentences, words) while enforcing **exact token limits**. No chunk ever exceeds `max_tokens`.
+
+| Feature | chunkedrs | text-splitter | Manual |
+|---------|-----------|---------------|--------|
+| Token-accurate limits | Yes (tiktoken) | Character-based | No |
+| Recursive splitting | Yes | Yes | DIY |
+| Markdown-aware | Yes (section metadata) | No | DIY |
+| Semantic splitting | Yes (via embedrs) | No | DIY |
+| Byte offsets | Yes | No | DIY |
+| Token count per chunk | Yes | No | DIY |
+| Overlap support | Token-level | Character-level | DIY |
+| Tokenizer selection | Model name or encoding | N/A | N/A |
 
 ## Strategies
 
@@ -26,12 +46,24 @@ chunkedrs splits at **semantic boundaries** (paragraphs → sentences → words)
 
 ## Quick start
 
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+chunkedrs = "1"
+```
+
+Split text with defaults (recursive, 512 max tokens, no overlap):
+
 ```rust
-// split with defaults: recursive, 512 max tokens, no overlap
-let chunks = chunkedrs::chunk("your long text here...").split();
+use chunkedrs::Chunk;
+
+let chunks: Vec<Chunk> = chunkedrs::chunk("your long text here...").split();
 for chunk in &chunks {
-    println!("[{}] {} tokens", chunk.index, chunk.token_count);
+    println!("[{}] {} tokens (bytes {}..{})", chunk.index, chunk.token_count, chunk.start_byte, chunk.end_byte);
 }
+// Output:
+// [0] 4 tokens (bytes 0..21)
 ```
 
 ## Token-accurate splitting
@@ -112,6 +144,17 @@ let chunks = chunkedrs::chunk(text).encoding("cl100k_base").split();
 
 // default: o200k_base (GPT-4o, GPT-4-turbo)
 ```
+
+## Ecosystem
+
+chunkedrs is part of **airs** (AI in Rust Series) — a family of crates for AI infrastructure:
+
+| Crate | Description |
+|-------|-------------|
+| [tiktoken](https://crates.io/crates/tiktoken) | High-performance BPE tokenizer for all major LLMs |
+| [embedrs](https://crates.io/crates/embedrs) | Unified embedding — cloud APIs + local inference through one interface |
+| [instructors](https://crates.io/crates/instructors) | Type-safe structured output extraction from LLMs |
+| **chunkedrs** | Token-accurate text chunking (this crate) |
 
 ## License
 
