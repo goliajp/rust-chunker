@@ -1,0 +1,29 @@
+[package]
+name = "chunkedrs"
+version = "1.0.2"
+edition = "2024"
+rust-version = "1.94"
+description = "AI-native text chunking — recursive, markdown-aware, and semantic splitting with token-accurate boundaries"
+license = "MIT"
+repository = "https://github.com/goliajp/rust-chunker"
+homepage = "https://github.com/goliajp/rust-chunker"
+authors = ["GOLIA株式会社", "Li Hao <lihao@golia.jp>"]
+documentation = "https://docs.rs/chunkedrs"
+keywords = ["chunking", "rag", "text-splitting", "tokenizer", "ai"]
+categories = ["text-processing"]
+readme = "README.md"
+
+[dependencies]
+tiktoken = "3.1"
+embedrs = { version = "0.3", optional = true }
+
+[features]
+default = []
+semantic = ["dep:embedrs"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
