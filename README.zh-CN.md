@@ -147,14 +147,14 @@ let chunks = chunkedrs::chunk(text).encoding("cl100k_base").split();
 
 ## 生态系统
 
-chunkedrs 是 **airs**（AI in Rust Series）的一部分 — 一系列 AI 基础设施 crate：
+GOLIA 出品的一系列独立 AI 基础设施 crate，每个各自独立仓：
 
-| Crate | 描述 |
-|-------|------|
-| [tiktoken](https://crates.io/crates/tiktoken) | 高性能 BPE 分词器，支持所有主流 LLM |
-| [embedrs](https://crates.io/crates/embedrs) | 统一 embedding — 云 API + 本地推理，同一接口 |
-| [instructors](https://crates.io/crates/instructors) | 类型安全的 LLM 结构化输出提取 |
-| **chunkedrs** | Token 精确文本分块（本 crate） |
+| Crate | 仓库 | 描述 |
+|-------|------|------|
+| [tiktoken](https://crates.io/crates/tiktoken) | [rust-tiktoken](https://github.com/goliajp/rust-tiktoken) | 高性能 BPE 分词器，支持所有主流 LLM |
+| [embedrs](https://crates.io/crates/embedrs) | [rust-embeddings](https://github.com/goliajp/rust-embeddings) | 统一 embedding —— 云 API + 本地推理，同一接口 |
+| [instructors](https://crates.io/crates/instructors) | [rust-instructor](https://github.com/goliajp/rust-instructor) | 类型安全的 LLM 结构化输出提取 |
+| **chunkedrs** | [rust-chunker](https://github.com/goliajp/rust-chunker) | Token 精确文本分块（本 crate） |
 
 ## 许可证
 

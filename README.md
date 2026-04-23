@@ -147,14 +147,14 @@ let chunks = chunkedrs::chunk(text).encoding("cl100k_base").split();
 
 ## Ecosystem
 
-chunkedrs is part of **airs** (AI in Rust Series) — a family of crates for AI infrastructure:
+Part of a family of independent AI-infrastructure crates by GOLIA, each in its own repo:
 
-| Crate | Description |
-|-------|-------------|
-| [tiktoken](https://crates.io/crates/tiktoken) | High-performance BPE tokenizer for all major LLMs |
-| [embedrs](https://crates.io/crates/embedrs) | Unified embedding — cloud APIs + local inference through one interface |
-| [instructors](https://crates.io/crates/instructors) | Type-safe structured output extraction from LLMs |
-| **chunkedrs** | Token-accurate text chunking (this crate) |
+| Crate | Repo | Description |
+|-------|------|-------------|
+| [tiktoken](https://crates.io/crates/tiktoken) | [rust-tiktoken](https://github.com/goliajp/rust-tiktoken) | High-performance BPE tokenizer for all major LLMs |
+| [embedrs](https://crates.io/crates/embedrs) | [rust-embeddings](https://github.com/goliajp/rust-embeddings) | Unified embedding — cloud APIs + local inference through one interface |
+| [instructors](https://crates.io/crates/instructors) | [rust-instructor](https://github.com/goliajp/rust-instructor) | Type-safe structured output extraction from LLMs |
+| **chunkedrs** | [rust-chunker](https://github.com/goliajp/rust-chunker) | Token-accurate text chunking (this crate) |
 
 ## License
 
