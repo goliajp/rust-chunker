@@ -147,14 +147,14 @@ let chunks = chunkedrs::chunk(text).encoding("cl100k_base").split();
 
 ## エコシステム
 
-chunkedrs は **airs**（AI in Rust Series）の一部です — AI インフラストラクチャ crate シリーズ：
+GOLIA の独立した AI インフラ crate ファミリーの一員、各々が独自のリポジトリ:
 
-| Crate | 説明 |
-|-------|------|
-| [tiktoken](https://crates.io/crates/tiktoken) | 主要 LLM 全対応の高性能 BPE トークナイザー |
-| [embedrs](https://crates.io/crates/embedrs) | 統合 embedding — クラウド API + ローカル推論を同一インターフェースで |
-| [instructors](https://crates.io/crates/instructors) | LLM からの型安全な構造化出力抽出 |
-| **chunkedrs** | トークン精度のテキストチャンキング（本 crate） |
+| Crate | リポジトリ | 説明 |
+|-------|------------|------|
+| [tiktoken](https://crates.io/crates/tiktoken) | [rust-tiktoken](https://github.com/goliajp/rust-tiktoken) | 主要 LLM 全対応の高性能 BPE トークナイザー |
+| [embedrs](https://crates.io/crates/embedrs) | [rust-embeddings](https://github.com/goliajp/rust-embeddings) | 統合 embedding — クラウド API + ローカル推論を同一インターフェースで |
+| [instructors](https://crates.io/crates/instructors) | [rust-instructor](https://github.com/goliajp/rust-instructor) | LLM からの型安全な構造化出力抽出 |
+| **chunkedrs** | [rust-chunker](https://github.com/goliajp/rust-chunker) | トークン精度のテキストチャンキング（本 crate） |
 
 ## ライセンス
 
