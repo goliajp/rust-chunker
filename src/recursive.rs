@@ -504,7 +504,7 @@ mod tests {
         let enc = encoder();
         let text = "最初の段落です。日本語のテキストを含みます。\n\n二番目の段落です。異なる内容があります。";
         let chunks = split_recursive(text, 0, 15, 0, enc, &None);
-        assert!(chunks.len() >= 1);
+        assert!(!chunks.is_empty());
         for chunk in &chunks {
             assert!(chunk.token_count <= 15);
         }

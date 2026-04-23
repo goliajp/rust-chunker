@@ -442,7 +442,7 @@ mod tests {
         let text =
             "これは日本語のテキストです。複数の文が含まれています。正しく分割されるべきです。";
         let chunks = chunk(text).max_tokens(10).split();
-        assert!(chunks.len() >= 1);
+        assert!(!chunks.is_empty());
         for c in &chunks {
             assert!(c.token_count <= 10);
         }
