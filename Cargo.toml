@@ -1,6 +1,6 @@
 [package]
 name = "chunkedrs"
-version = "1.0.2"
+version = "1.0.3"
 edition = "2024"
 rust-version = "1.94"
 description = "AI-native text chunking — recursive, markdown-aware, and semantic splitting with token-accurate boundaries"
