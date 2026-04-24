@@ -145,16 +145,21 @@ let chunks = chunkedrs::chunk(text).encoding("cl100k_base").split();
 // デフォルト：o200k_base（GPT-4o, GPT-4-turbo）
 ```
 
+<!-- ECOSYSTEM BEGIN (synced by claws/opensource/scripts/sync-ecosystem.py — edit ecosystem.toml, not this block) -->
+
 ## エコシステム
 
-GOLIA の独立した AI インフラ crate ファミリーの一員、各々が独自のリポジトリ:
+GOLIA の Rust AI インフラ系列の一員 — 各々独立したリポジトリで、crates.io 経由で組み合わせ:
 
-| Crate | リポジトリ | 説明 |
-|-------|------------|------|
-| [tiktoken](https://crates.io/crates/tiktoken) | [rust-tiktoken](https://github.com/goliajp/rust-tiktoken) | 主要 LLM 全対応の高性能 BPE トークナイザー |
-| [embedrs](https://crates.io/crates/embedrs) | [rust-embeddings](https://github.com/goliajp/rust-embeddings) | 統合 embedding — クラウド API + ローカル推論を同一インターフェースで |
+| Crate / Package | リポジトリ | 説明 |
+|---|---|---|
+| [tiktoken](https://crates.io/crates/tiktoken) | [rust-tiktoken](https://github.com/goliajp/rust-tiktoken) | 高性能 BPE トークナイザー — 9 エンコーディング、57 モデル、各社料金 |
+| [@goliapkg/tiktoken-wasm](https://www.npmjs.com/package/@goliapkg/tiktoken-wasm) | [rust-tiktoken](https://github.com/goliajp/rust-tiktoken) | tiktoken の WASM バインディング — ブラウザ / Node.js |
 | [instructors](https://crates.io/crates/instructors) | [rust-instructor](https://github.com/goliajp/rust-instructor) | LLM からの型安全な構造化出力抽出 |
-| **chunkedrs** | [rust-chunker](https://github.com/goliajp/rust-chunker) | トークン精度のテキストチャンキング（本 crate） |
+| [embedrs](https://crates.io/crates/embedrs) | [rust-embeddings](https://github.com/goliajp/rust-embeddings) | 統一 embedding — クラウド API + ローカル推論、単一インターフェース |
+| **chunkedrs**（本 crate） | [rust-chunker](https://github.com/goliajp/rust-chunker) | AI ネイティブテキストチャンキング — 再帰、Markdown 対応、セマンティック |
+
+<!-- ECOSYSTEM END -->
 
 ## ライセンス
 
