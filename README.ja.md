@@ -145,7 +145,7 @@ let chunks = chunkedrs::chunk(text).encoding("cl100k_base").split();
 // デフォルト：o200k_base（GPT-4o, GPT-4-turbo）
 ```
 
-<!-- ECOSYSTEM BEGIN (synced by claws/opensource/scripts/sync-ecosystem.py — edit ecosystem.toml, not this block) -->
+<!-- ECOSYSTEM BEGIN (generated — edit ecosystem.toml, not this block) -->
 
 ## エコシステム
 
