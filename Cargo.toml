@@ -1,6 +1,6 @@
 [package]
 name = "chunkedrs"
-version = "1.0.3"
+version = "1.0.4"
 edition = "2024"
 description = "AI-native text chunking — recursive, markdown-aware, and semantic splitting with token-accurate boundaries"
 license = "MIT"
