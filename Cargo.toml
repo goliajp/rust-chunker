@@ -14,7 +14,7 @@ readme = "README.md"
 
 [dependencies]
 tiktoken = "3.1"
-embedrs = { version = "0.3", optional = true }
+embedrs = { version = "0.4", optional = true }
 
 [features]
 default = []
