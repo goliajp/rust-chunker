@@ -84,7 +84,7 @@ for chunk in &chunks {
 let chunks = chunkedrs::chunk("長いテキスト...")
     .max_tokens(256)
     .overlap(50)
-    .model("gpt-4o")
+    .model("gpt-5.6-terra")
     .split();
 
 // すべてのチャンクが <= 256 トークンであることを保証
@@ -215,7 +215,7 @@ let chunks = chunkedrs::chunk("長いテキスト...")
 
 ```rust
 // モデル名から自動検出
-let chunks = chunkedrs::chunk(text).model("gpt-4o").split();
+let chunks = chunkedrs::chunk(text).model("gpt-5.6-terra").split();
 
 // 17 種のエンコーディングを直接指定
 let chunks = chunkedrs::chunk(text).encoding("cl100k_base").split();

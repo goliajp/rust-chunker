@@ -84,7 +84,7 @@ for chunk in &chunks {
 let chunks = chunkedrs::chunk("你的长文本...")
     .max_tokens(256)
     .overlap(50)
-    .model("gpt-4o")
+    .model("gpt-5.6-terra")
     .split();
 
 // 每个分块保证 <= 256 tokens
@@ -218,7 +218,7 @@ let chunks = chunkedrs::chunk("你的长文本...")
 
 ```rust
 // 从模型名称自动检测
-let chunks = chunkedrs::chunk(text).model("gpt-4o").split();
+let chunks = chunkedrs::chunk(text).model("gpt-5.6-terra").split();
 
 // 或直接指定 17 种编码之一
 let chunks = chunkedrs::chunk(text).encoding("cl100k_base").split();

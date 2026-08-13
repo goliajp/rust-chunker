@@ -70,7 +70,7 @@
 //! let chunks = chunkedrs::chunk("your long text here...")
 //!     .max_tokens(256)
 //!     .overlap(50)
-//!     .model("gpt-4o")
+//!     .model("gpt-5.6-terra")
 //!     .split();
 //!
 //! // every chunk is guaranteed to have <= 256 tokens
@@ -361,7 +361,7 @@ impl<'a> ChunkBuilder<'a> {
     /// See [vocabulary features](crate#vocabulary-features).
     ///
     /// ```rust
-    /// let chunks = chunkedrs::chunk("hello world").model("gpt-4o").split();
+    /// let chunks = chunkedrs::chunk("hello world").model("gpt-5.6-terra").split();
     /// ```
     pub fn model(mut self, model: &'a str) -> Self {
         self.model_name = Some(model);

@@ -84,7 +84,7 @@ for chunk in &chunks {
 let chunks = chunkedrs::chunk("your long text here...")
     .max_tokens(256)
     .overlap(50)
-    .model("gpt-4o")
+    .model("gpt-5.6-terra")
     .split();
 
 // every chunk is guaranteed to have <= 256 tokens
@@ -223,7 +223,7 @@ by default; measure before turning it on.
 
 ```rust
 // auto-detect from model name
-let chunks = chunkedrs::chunk(text).model("gpt-4o").split();
+let chunks = chunkedrs::chunk(text).model("gpt-5.6-terra").split();
 
 // or specify one of the 17 encodings directly
 let chunks = chunkedrs::chunk(text).encoding("cl100k_base").split();
