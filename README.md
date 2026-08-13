@@ -235,6 +235,41 @@ Model names resolve across OpenAI, Meta (`llama-3.1-70b`), DeepSeek
 (`deepseek-v4`), Alibaba (`qwen2.5-72b`), Mistral, Moonshot (`kimi-k2`), Zhipu
 (`glm-5`) and MiniMax (`minimax-m2`).
 
+## Vocabulary features
+
+Tokenizer vocabularies are the bulk of the compiled size, and most builds use
+one. They are opt-out: the default carries all 17 encodings, and
+`default-features = false` keeps only `o200k_base` — the encoder every
+unresolved name falls back to, so it is never absent.
+
+```toml
+# everything (default)
+chunkedrs = "2"
+
+# o200k_base only — GPT-4o, GPT-5, o-series
+chunkedrs = { version = "2", default-features = false }
+
+# o200k_base plus the Zhipu family
+chunkedrs = { version = "2", default-features = false, features = ["vocab-zhipu"] }
+```
+
+Measured on `examples/basic`, release build:
+
+| | size |
+|---|---:|
+| all vocabularies (default) | 7,100,544 |
+| `default-features = false` | 2,695,104 |
+| | **−62%** |
+
+Vendor groups: `vocab-openai`, `vocab-meta`, `vocab-deepseek`, `vocab-qwen`,
+`vocab-mistral`, `vocab-moonshot`, `vocab-zhipu`, `vocab-minimax`. Individual
+vocabularies: `vocab-cl100k_base`, `vocab-llama3`, `vocab-glm5`, and so on.
+
+**One sharp edge.** Asking for a vocabulary this build did not compile in is
+indistinguishable from a typo — both fall back to `o200k_base` silently, so you
+get plausible counts for the wrong tokenizer. If you slim the build, check that
+the encodings you name are ones you enabled.
+
 Anthropic and Google do not publish tiktoken-compatible vocabularies, so
 `claude-*` and `gemini-*` do **not** resolve — an unrecognised name falls back
 to `o200k_base`, which is an approximation rather than an exact count. Use

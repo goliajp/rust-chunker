@@ -13,21 +13,60 @@ categories = ["text-processing"]
 readme = "README.md"
 
 [dependencies]
-# 4 is a floor, not a preference: 3.6.0 fixed a pre-tokenizer bug that split
+# 4 is a floor, not a preference. 3.6.0 fixed a pre-tokenizer bug that split
 # canonical newline runs, and `"\n\n"` is this crate's top-priority separator —
 # every paragraph break in every document was overcounted by one token below it.
-# 3.8.0 fixed the o200k punctuation rule's missing `/` tail. See
-# tests/tokenizer_contract.rs, which pins both. 4.0.0 changed no token ids and
-# no signatures; it moved the vocabularies behind default-on features, which
-# this release does not opt out of.
-tiktoken = "4"
-# embedrs 0.5 is the first release on tiktoken 4; anything older would pull a
-# second major of it into a build that also enables embedrs `cost-tracking`.
+# 3.8.0 fixed the o200k punctuation rule's missing `/` tail. 4.0.0 moved the
+# vocabularies behind features, which is what the `vocab-*` passthrough below
+# exists to forward. See tests/tokenizer_contract.rs, which pins the first two.
+#
+# `vocab-o200k_base` is not optional here: it is the encoder every unrecognised
+# model name falls back to, so `resolve_encoder` can never fail to find one.
+# Everything beyond it is the caller's choice.
+tiktoken = { version = "4", default-features = false, features = [
+    "vocab-o200k_base",
+] }
+# 0.5 is a floor for the same reason: embedrs 0.5 is the first release to
+# depend on tiktoken 4, so anything older would pull a second major of it into
+# a build that enables `semantic` alongside embedrs `cost-tracking`.
 embedrs = { version = "0.5", optional = true }
 
 [features]
-default = []
+# Vocabularies are opt-out, mirroring tiktoken 4. The default is every one of
+# them, which is what a 1.x build shipped; `default-features = false` keeps
+# ~5 MB of vocabulary data you may not need out of your binary, leaving
+# o200k_base (GPT-4o / GPT-5 / o-series), which is also the fallback encoder.
+#
+#   chunkedrs = { version = "2", default-features = false }
+#   chunkedrs = { version = "2", default-features = false, features = ["vocab-zhipu"] }
+default = ["vocabs-all"]
 semantic = ["dep:embedrs"]
+
+vocabs-all = ["tiktoken/vocabs-all"]
+
+# by vendor
+vocab-openai = ["tiktoken/vocab-openai"]
+vocab-meta = ["tiktoken/vocab-meta"]
+vocab-deepseek = ["tiktoken/vocab-deepseek"]
+vocab-qwen = ["tiktoken/vocab-qwen"]
+vocab-mistral = ["tiktoken/vocab-mistral"]
+vocab-moonshot = ["tiktoken/vocab-moonshot"]
+vocab-zhipu = ["tiktoken/vocab-zhipu"]
+vocab-minimax = ["tiktoken/vocab-minimax"]
+
+# by vocabulary
+vocab-cl100k_base = ["tiktoken/vocab-cl100k_base"]
+vocab-o200k_base = ["tiktoken/vocab-o200k_base"]
+vocab-r50k_base = ["tiktoken/vocab-r50k_base"]
+vocab-p50k_base = ["tiktoken/vocab-p50k_base"]
+vocab-llama3 = ["tiktoken/vocab-llama3"]
+vocab-deepseek_v3 = ["tiktoken/vocab-deepseek_v3"]
+vocab-qwen2 = ["tiktoken/vocab-qwen2"]
+vocab-mistral_v3 = ["tiktoken/vocab-mistral_v3"]
+vocab-kimi_k2 = ["tiktoken/vocab-kimi_k2"]
+vocab-glm4 = ["tiktoken/vocab-glm4"]
+vocab-glm5 = ["tiktoken/vocab-glm5"]
+vocab-minimax_m2 = ["tiktoken/vocab-minimax_m2"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
