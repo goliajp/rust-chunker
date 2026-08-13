@@ -105,6 +105,36 @@
 //! assert!(chunks.len() >= 2);
 //! ```
 //!
+//! ## Vocabulary features
+//!
+//! Tokenizer vocabularies are the bulk of this crate's compiled size, and most
+//! builds use one. They are opt-out: the default carries all 17 encodings, and
+//! `default-features = false` keeps only `o200k_base` — the encoder every
+//! unresolved name falls back to, so it is never absent.
+//!
+//! ```toml
+//! # everything (default)
+//! chunkedrs = "2"
+//!
+//! # o200k_base only — GPT-4o, GPT-5, o-series
+//! chunkedrs = { version = "2", default-features = false }
+//!
+//! # o200k_base plus the Zhipu family
+//! chunkedrs = { version = "2", default-features = false, features = ["vocab-zhipu"] }
+//! ```
+//!
+//! Measured on `examples/basic`, release: **7,100,544 → 2,695,104 bytes**, 62%.
+//!
+//! Features come in vendor groups (`vocab-openai`, `vocab-meta`,
+//! `vocab-deepseek`, `vocab-qwen`, `vocab-mistral`, `vocab-moonshot`,
+//! `vocab-zhipu`, `vocab-minimax`) and per-vocabulary
+//! (`vocab-cl100k_base`, `vocab-llama3`, `vocab-glm5`, …).
+//!
+//! **One sharp edge.** Asking for a vocabulary this build did not compile in is
+//! indistinguishable from a typo: both fall back to `o200k_base` silently, and
+//! you get plausible counts for the wrong tokenizer. If you slim the build,
+//! make sure the encodings you name are ones you enabled.
+//!
 //! ## Semantic splitting
 //!
 //! With the `semantic` feature enabled, split at meaning boundaries using embeddings:
@@ -327,6 +357,9 @@ impl<'a> ChunkBuilder<'a> {
     /// `claude-*` and `gemini-*` take that fallback — an approximation, not an
     /// exact count.
     ///
+    /// A model whose vocabulary was not compiled in takes the same fallback.
+    /// See [vocabulary features](crate#vocabulary-features).
+    ///
     /// ```rust
     /// let chunks = chunkedrs::chunk("hello world").model("gpt-4o").split();
     /// ```
@@ -340,7 +373,11 @@ impl<'a> ChunkBuilder<'a> {
     /// Use this when you know the exact encoding (e.g. `"cl100k_base"`, `"o200k_base"`).
     /// Takes precedence over [`.model()`](ChunkBuilder::model) if both are set.
     ///
-    /// If the encoding name is not recognized, falls back to `o200k_base` silently.
+    /// If the encoding name is not recognized, falls back to `o200k_base`
+    /// silently. Since tiktoken 4 a vocabulary that was not compiled in is
+    /// *also* unrecognized, and looks identical to a typo — so a slimmed build
+    /// that asks for a vocabulary it did not enable gets `o200k_base` counts
+    /// without complaint. See [vocabulary features](crate#vocabulary-features).
     ///
     /// ```rust
     /// let chunks = chunkedrs::chunk("hello world").encoding("cl100k_base").split();
@@ -698,7 +735,10 @@ mod tests {
         assert!(enc.count("hello") > 0);
     }
 
+    /// Needs two distinct vocabularies compiled in; a build that names only
+    /// `vocab-o200k_base` resolves both sides to the same encoder.
     #[test]
+    #[cfg(feature = "vocab-cl100k_base")]
     fn model_and_encoding_are_independent() {
         // encoding takes precedence over model
         // gpt-4o uses o200k_base, but we explicitly set cl100k_base

@@ -28,6 +28,25 @@ jobs:
       - run: cargo test --workspace --all-targets
       - run: cargo test --workspace --doc
 
+  feature-matrix:
+    name: vocabulary feature combinations
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The slim build is the one that rots silently: an encoding whose
+      # vocabulary is not compiled in does not fail to build, it falls back to
+      # o200k_base at run time. Only tests catch that, so run them.
+      - name: o200k_base only
+        run: cargo test --no-default-features
+      - name: one vendor group on top of the floor
+        run: cargo test --no-default-features --features vocab-zhipu
+      - name: one vocabulary on top of the floor
+        run: cargo test --no-default-features --features vocab-cl100k_base
+      - name: everything, including semantic
+        run: cargo test --all-features
+
   lint:
     name: fmt + clippy (lib strict)
     runs-on: ubuntu-latest

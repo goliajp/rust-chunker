@@ -7,12 +7,21 @@
 //! into single-newline tokens, overcounting every paragraph break by one token.
 //! These tests pin that behaviour so a dependency downgrade cannot reintroduce it.
 
+/// Vocabularies are features as of tiktoken 4, so only the ones this build
+/// actually compiled in can be asserted against. `o200k_base` is always
+/// present — it is the fallback encoder chunkedrs resolves to.
+const ENCODINGS_UNDER_TEST: &[&str] = &[
+    "o200k_base",
+    #[cfg(feature = "vocab-cl100k_base")]
+    "cl100k_base",
+];
+
 /// `"\n\n"` must merge into a single token, not two `"\n"` tokens.
 ///
 /// Before tiktoken 3.6.0 this counted 4 on both cl100k_base and o200k_base.
 #[test]
 fn canonical_double_newline_is_one_token() {
-    for name in ["o200k_base", "cl100k_base"] {
+    for name in ENCODINGS_UNDER_TEST {
         let enc = tiktoken::get_encoding(name).expect(name);
         assert_eq!(
             enc.count("word\n\nnext"),
@@ -26,7 +35,7 @@ fn canonical_double_newline_is_one_token() {
 /// A CRLF pair must not split into separate `\r` and `\n` tokens.
 #[test]
 fn canonical_crlf_is_not_split() {
-    for name in ["o200k_base", "cl100k_base"] {
+    for name in ENCODINGS_UNDER_TEST {
         let enc = tiktoken::get_encoding(name).expect(name);
         let ids = enc.encode("a\r\nb");
         assert!(
@@ -85,6 +94,9 @@ fn advertised_models_resolve() {
 }
 
 /// Encodings the crate exposes by name must all be reachable.
+///
+/// As of tiktoken 4 `list_encodings()` reports only the vocabularies compiled
+/// in, so this is a contract about *this build*, not the catalogue.
 #[test]
 fn advertised_encodings_resolve() {
     for name in tiktoken::list_encodings() {
@@ -93,9 +105,27 @@ fn advertised_encodings_resolve() {
             "listed encoding '{name}' must be constructible"
         );
     }
+}
+
+/// The full catalogue, when this build asked for all of it.
+#[test]
+#[cfg(feature = "vocabs-all")]
+fn full_catalogue_is_present() {
     assert!(
         tiktoken::list_encodings().len() >= 17,
         "expected the 2026-08 encoding catalogue (17+), got {}",
         tiktoken::list_encodings().len()
     );
+}
+
+/// `o200k_base` is the encoder every unresolved name falls back to, so it must
+/// be present in *every* build regardless of which vocab features are on.
+/// The dependency declaration enables it unconditionally; this pins that.
+#[test]
+fn fallback_encoding_is_always_available() {
+    assert!(
+        tiktoken::get_encoding("o200k_base").is_some(),
+        "o200k_base must survive `default-features = false`"
+    );
+    assert!(chunkedrs::chunk("hello world").split()[0].token_count > 0);
 }

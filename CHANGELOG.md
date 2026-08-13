@@ -31,6 +31,29 @@ well — chunk boundaries and token counts both moved there.
 
 ### Added
 
+- **Vocabulary features, forwarded from tiktoken 4.** Tokenizer vocabularies
+  are the bulk of the compiled size and most builds use one of them. They are
+  now opt-out: `default` carries all 17 encodings as before, and
+  `default-features = false` keeps only `o200k_base`.
+
+  ```toml
+  chunkedrs = { version = "2", default-features = false, features = ["vocab-zhipu"] }
+  ```
+
+  Measured on `examples/basic`, release: **7,100,544 → 2,695,104 bytes**, −62%.
+
+  `vocab-o200k_base` is enabled unconditionally by the dependency declaration
+  rather than being one of the optional features. It is the encoder every
+  unresolved name falls back to, so `resolve_encoder` cannot fail to find one —
+  that is now a structural guarantee instead of an assumption, and
+  `fallback_encoding_is_always_available` pins it.
+
+  One sharp edge, documented in the READMEs and on `.encoding()`: a vocabulary
+  that was not compiled in is indistinguishable from a typo — both fall back to
+  `o200k_base` silently. CI gained a `feature-matrix` job that runs the tests
+  across four vocabulary configurations, because a slim build fails at run time
+  rather than at compile time and only tests catch it.
+
 - **Token spans on every chunk** — `start_token` and `end_token` give the
   chunk's range in the *document's* token stream. This is the entry ticket for
   [late chunking](https://arxiv.org/abs/2409.04701): embed the document once,
@@ -87,6 +110,19 @@ well — chunk boundaries and token counts both moved there.
   byte-for-byte reconstructible — it already was not, since markdown keeps
   header lines in metadata — but every surviving chunk's byte range still
   addresses the source exactly.
+
+### Changed — dependencies
+
+- `tiktoken` floor `"3.8"` → `"4"`. Token ids, encoding behaviour and function
+  signatures are unchanged across that major — the bump is entirely about
+  vocabularies becoming features — so no chunk boundary moves because of it.
+  4.0.0 also halves the vocabulary payload by re-encoding it as `TKV1`.
+
+  Note for anyone combining this with `embedrs`: `embedrs` 0.4's optional
+  `cost-tracking` feature still requires `tiktoken` `^3.5`. chunkedrs does not
+  enable it, so the default tree carries one tiktoken — but a project that
+  turns `cost-tracking` on alongside `chunkedrs` 2 will compile two majors of
+  it until `embedrs` moves to 4.
 
 ### Changed — internal
 

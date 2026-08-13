@@ -230,6 +230,39 @@ let chunks = chunkedrs::chunk(text).encoding("cl100k_base").split();
 阿里（`qwen2.5-72b`）、Mistral、月之暗面（`kimi-k2`）、智谱（`glm-5`）、
 MiniMax（`minimax-m2`）。
 
+## 词表 feature
+
+分词器词表占了编译体积的绝大部分，而大多数项目只用其中一两个。词表是
+**opt-out** 的：默认带全部 17 种编码，`default-features = false` 只保留
+`o200k_base` —— 它是所有无法解析的名字最终回落到的编码器，因此永远不会缺席。
+
+```toml
+# 全部（默认）
+chunkedrs = "2"
+
+# 只要 o200k_base —— GPT-4o、GPT-5、o 系列
+chunkedrs = { version = "2", default-features = false }
+
+# o200k_base 加上智谱系列
+chunkedrs = { version = "2", default-features = false, features = ["vocab-zhipu"] }
+```
+
+实测 `examples/basic`，release 构建：
+
+| | 体积 |
+|---|---:|
+| 全部词表（默认） | 7,100,544 |
+| `default-features = false` | 2,695,104 |
+| | **−62%** |
+
+按厂商分组：`vocab-openai`、`vocab-meta`、`vocab-deepseek`、`vocab-qwen`、
+`vocab-mistral`、`vocab-moonshot`、`vocab-zhipu`、`vocab-minimax`。
+也可按单个词表启用：`vocab-cl100k_base`、`vocab-llama3`、`vocab-glm5` 等。
+
+**一个尖角。** 请求一个本次构建没有编进来的词表，和把名字拼错是分不出来的 ——
+两者都会静默回落到 `o200k_base`，于是你拿到的是一个看起来合理、但来自错误
+分词器的计数。精简构建时，请确认你点名的编码就是你启用过的那些。
+
 Anthropic 和 Google 没有公开 tiktoken 兼容的词表，所以 `claude-*` 和
 `gemini-*` **不会**匹配 —— 无法识别的名字会回落到 `o200k_base`，那是估算
 而非精确计数。需要显式固定这一行为时请用 `.encoding()`。

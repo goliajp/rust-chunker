@@ -225,6 +225,33 @@ let chunks = chunkedrs::chunk(text).encoding("cl100k_base").split();
 
 モデル名は OpenAI、Meta（`llama-3.1-70b`）、DeepSeek（`deepseek-v4`）、Alibaba（`qwen2.5-72b`）、Mistral、Moonshot（`kimi-k2`）、Zhipu（`glm-5`）、MiniMax（`minimax-m2`）に対応します。
 
+## 語彙 feature
+
+トークナイザーの語彙データはコンパイル後サイズの大半を占めますが、実際に使うのは通常ひとつかふたつです。語彙は **opt-out** です。デフォルトは 17 種すべてを含み、`default-features = false` では `o200k_base` だけが残ります — 解決できなかった名前が最終的にフォールバックする先なので、これが欠けることはありません。
+
+```toml
+# すべて（デフォルト）
+chunkedrs = "2"
+
+# o200k_base のみ — GPT-4o、GPT-5、o シリーズ
+chunkedrs = { version = "2", default-features = false }
+
+# o200k_base に Zhipu 系を追加
+chunkedrs = { version = "2", default-features = false, features = ["vocab-zhipu"] }
+```
+
+`examples/basic` の release ビルドでの実測値：
+
+| | サイズ |
+|---|---:|
+| 全語彙（デフォルト） | 7,100,544 |
+| `default-features = false` | 2,695,104 |
+| | **−62%** |
+
+ベンダー単位のグループ：`vocab-openai`、`vocab-meta`、`vocab-deepseek`、`vocab-qwen`、`vocab-mistral`、`vocab-moonshot`、`vocab-zhipu`、`vocab-minimax`。語彙単位（`vocab-cl100k_base`、`vocab-llama3`、`vocab-glm5` など）でも指定できます。
+
+**落とし穴がひとつ。** このビルドに含まれていない語彙を指名することと、名前を打ち間違えることは区別できません。どちらも黙って `o200k_base` にフォールバックするため、「もっともらしいが別のトークナイザーの」カウントが返ります。ビルドを絞る場合は、指名する encoding が有効化したものかどうかを確認してください。
+
 Anthropic と Google は tiktoken 互換の語彙を公開していないため、`claude-*` と `gemini-*` は **解決されません**。認識されない名前は `o200k_base` にフォールバックし、正確なカウントではなく近似値になります。この挙動を明示的に固定したい場合は `.encoding()` を使ってください。
 
 ## 1.x からの移行
