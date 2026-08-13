@@ -127,19 +127,13 @@ fn find_breakpoints(embeddings: &[Vec<f32>], threshold: f64) -> Vec<usize> {
     breakpoints
 }
 
+/// Cosine similarity, delegated to `embedrs`.
+///
+/// embedrs 0.4 rewrote this with 8-lane independent accumulators so LLVM
+/// autovectorizes it at `-C opt-level=3`; re-implementing it here would be
+/// both slower and a second thing to keep correct.
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
-    let mut dot = 0.0f64;
-    let mut norm_a = 0.0f64;
-    let mut norm_b = 0.0f64;
-    for (x, y) in a.iter().zip(b.iter()) {
-        let x = *x as f64;
-        let y = *y as f64;
-        dot += x * y;
-        norm_a += x * x;
-        norm_b += y * y;
-    }
-    let denom = norm_a.sqrt() * norm_b.sqrt();
-    if denom == 0.0 { 0.0 } else { dot / denom }
+    embedrs::similarity::cosine_similarity(a, b) as f64
 }
 
 /// group sentences by breakpoints

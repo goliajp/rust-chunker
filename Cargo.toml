@@ -13,8 +13,13 @@ categories = ["text-processing"]
 readme = "README.md"
 
 [dependencies]
-tiktoken = "3.1"
-embedrs = { version = "0.3", optional = true }
+# 3.8 is a floor, not a preference: 3.6.0 fixed a pre-tokenizer bug that split
+# canonical newline runs, and `"\n\n"` is this crate's top-priority separator —
+# every paragraph break in every document was overcounted by one token below it.
+# 3.8.0 fixed the o200k punctuation rule's missing `/` tail. See
+# tests/tokenizer_contract.rs, which pins both.
+tiktoken = "3.8"
+embedrs = { version = "0.4", optional = true }
 
 [features]
 default = []
