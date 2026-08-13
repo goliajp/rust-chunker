@@ -10,9 +10,24 @@
 //!
 //! | Strategy | Use case | Speed |
 //! |----------|----------|-------|
-//! | **Recursive** (default) | General text — paragraphs, sentences, words | Fastest |
-//! | **Markdown** | Documents with `#` headers — preserves section metadata | Fast |
+//! | **Recursive** (default) | General text — paragraphs, sentences, clauses, words | Fastest |
+//! | **Markdown** | Documents with headers — preserves section metadata | Fast |
 //! | **Semantic** | High-quality RAG — splits at meaning boundaries via embeddings | Slower (API calls) |
+//!
+//! ## CJK text
+//!
+//! Chinese and Japanese put no space after a sentence mark, so a separator
+//! ladder built out of `". "`, `", "` and `" "` matches nothing in them and
+//! falls through to cutting mid-word. chunkedrs splits on the marks these
+//! scripts actually use, and keeps a closing quote with the sentence it closes:
+//!
+//! ```rust
+//! let zh = "他说「今天天气很好。」然后就出门了。她回答说「确实不错。」于是也跟着出去了。";
+//! let chunks = chunkedrs::chunk(zh).max_tokens(12).split();
+//!
+//! assert_eq!(chunks[0].content, "他说「今天天气很好。」");
+//! assert_eq!(chunks[1].content, "然后就出门了。");
+//! ```
 //!
 //! ## Quick start
 //!
@@ -185,12 +200,19 @@ impl<'a> ChunkBuilder<'a> {
     /// Set the model name to auto-select the correct tokenizer encoding.
     ///
     /// Uses [`tiktoken::encoding_for_model`] to find the right encoding.
-    /// Default: `o200k_base` (GPT-4o, GPT-4-turbo).
+    /// Default: `o200k_base` (GPT-4o, GPT-5, o-series).
+    ///
+    /// Resolves names across OpenAI, Meta (`llama-3.1-70b`), DeepSeek
+    /// (`deepseek-v4`), Alibaba (`qwen2.5-72b`), Mistral, Moonshot (`kimi-k2`),
+    /// Zhipu (`glm-5`) and MiniMax (`minimax-m2`).
     ///
     /// This is independent of [`.encoding()`](ChunkBuilder::encoding). If both are
     /// set, `encoding` takes precedence.
     ///
     /// If the model name is not recognized, falls back to `o200k_base` silently.
+    /// Anthropic and Google publish no tiktoken-compatible vocabulary, so
+    /// `claude-*` and `gemini-*` take that fallback — an approximation, not an
+    /// exact count.
     ///
     /// ```rust
     /// let chunks = chunkedrs::chunk("hello world").model("gpt-4o").split();
@@ -217,9 +239,14 @@ impl<'a> ChunkBuilder<'a> {
 
     /// Use markdown-aware splitting.
     ///
-    /// Splits at `#` header boundaries first, then applies recursive splitting
+    /// Splits at header boundaries first, then applies recursive splitting
     /// within each section. Each chunk's [`Chunk::section`] field contains the
     /// header it belongs to.
+    ///
+    /// Headers are ATX (`#` through `######`) or setext (`===` / `---`
+    /// underline). Fenced code blocks are skipped, so a `#` comment inside a
+    /// shell or python block is not mistaken for a header, and YAML/TOML front
+    /// matter is excluded from header detection.
     ///
     /// Note: header lines themselves are stored in `section` metadata, not in
     /// chunk `content`. This means joining all chunk contents will not reproduce
