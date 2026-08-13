@@ -5,7 +5,10 @@ use tiktoken::CoreBpe;
 
 /// split markdown text by headers first, then apply recursive splitting within each section.
 ///
-/// headers are detected by lines starting with `#` (up to 6 levels).
+/// headers are ATX (`#` through `######`) or setext (`===` / `---` underline).
+/// fenced code blocks are skipped entirely, and YAML/TOML front matter is
+/// excluded from header detection — a `#` inside a shell block is a comment,
+/// and front matter's closing `---` is not a setext rule.
 /// each resulting chunk carries the section header in its `section` metadata field.
 ///
 /// note: header lines are stored in metadata only, not in chunk `content`.
@@ -40,29 +43,96 @@ pub(crate) fn split_markdown(
     all_chunks
 }
 
+/// An open fenced code block: the marker character and how many of it opened
+/// the fence. A fence can only be closed by a run of the same character that is
+/// at least as long, which is how documents nest markdown inside markdown.
+#[derive(Clone, Copy)]
+struct Fence {
+    marker: u8,
+    len: usize,
+}
+
+/// CommonMark allows up to three spaces of indentation before a block marker;
+/// four or more makes it an indented code block instead.
+const MAX_BLOCK_INDENT: usize = 3;
+
 /// extract markdown sections: (header, content, byte_offset)
 fn extract_sections(text: &str) -> Vec<(Option<String>, String, usize)> {
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let front_matter_end = front_matter_end(&lines);
+
     let mut sections: Vec<(Option<String>, String, usize)> = Vec::new();
     let mut current_header: Option<String> = None;
     let mut current_content = String::new();
     let mut current_offset = 0usize;
+    let mut fence: Option<Fence> = None;
+    let mut skip_next = false;
 
-    for line in text.split_inclusive('\n') {
-        let trimmed = line.trim_start();
-        if is_header(trimmed) {
-            // flush previous section
-            if !current_content.is_empty() {
-                sections.push((current_header.clone(), current_content, current_offset));
+    for (i, line) in lines.iter().enumerate() {
+        // the underline of a setext header, already consumed with its title
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+
+        let body = line.trim_start();
+        let indent = line.len() - body.len();
+        let indented_enough = indent <= MAX_BLOCK_INDENT;
+
+        // --- fenced code blocks -------------------------------------------
+        // Inside a fence nothing is markup. This is the whole point: `#` opens
+        // a comment in shell, python, ruby, yaml and toml, so without this the
+        // majority of technical documents grow phantom sections.
+        if let Some(open) = fence {
+            if indented_enough && closes_fence(body, open) {
+                fence = None;
             }
-            current_header = Some(trimmed.trim_end().to_string());
-            current_content = String::new();
-            let line_offset = byte_offset_of(line, text);
-            current_offset = line_offset + line.len();
-        } else {
-            if current_content.is_empty() {
-                current_offset = byte_offset_of(line, text);
+            push_content(line, text, &mut current_content, &mut current_offset);
+            continue;
+        }
+        if indented_enough && let Some(open) = opens_fence(body) {
+            fence = Some(open);
+            push_content(line, text, &mut current_content, &mut current_offset);
+            continue;
+        }
+
+        // --- headers -------------------------------------------------------
+        // Front matter is metadata, not prose: its closing `---` follows an
+        // ordinary `key: value` line and would otherwise read as a setext rule.
+        let in_front_matter = i < front_matter_end;
+
+        let mut header: Option<String> = None;
+        let mut header_end = line.len();
+
+        if !in_front_matter && indented_enough {
+            if is_header(body) {
+                header = Some(body.trim_end().to_string());
+            } else if !body.trim().is_empty()
+                && lines
+                    .get(i + 1)
+                    .is_some_and(|next| is_setext_underline(next))
+            {
+                // `Title` followed by `====` or `----`
+                header = Some(body.trim_end().to_string());
+                header_end = line.len() + lines[i + 1].len();
+                skip_next = true;
             }
-            current_content.push_str(line);
+        }
+
+        match header {
+            Some(h) => {
+                // flush previous section
+                if !current_content.is_empty() {
+                    sections.push((
+                        current_header.clone(),
+                        std::mem::take(&mut current_content),
+                        current_offset,
+                    ));
+                }
+                current_header = Some(h);
+                current_offset = byte_offset_of(line, text) + header_end;
+            }
+            None => push_content(line, text, &mut current_content, &mut current_offset),
         }
     }
 
@@ -74,9 +144,69 @@ fn extract_sections(text: &str) -> Vec<(Option<String>, String, usize)> {
     sections
 }
 
+fn push_content(line: &str, text: &str, content: &mut String, offset: &mut usize) {
+    if content.is_empty() {
+        *offset = byte_offset_of(line, text);
+    }
+    content.push_str(line);
+}
+
+/// An ATX header: one to six `#` followed by a space.
 fn is_header(line: &str) -> bool {
     let hashes = line.bytes().take_while(|&b| b == b'#').count();
     (1..=6).contains(&hashes) && line.as_bytes().get(hashes) == Some(&b' ')
+}
+
+/// A setext underline: a run of only `=` or only `-`.
+fn is_setext_underline(line: &str) -> bool {
+    let body = line.trim_start();
+    if line.len() - body.len() > MAX_BLOCK_INDENT {
+        return false;
+    }
+    let body = body.trim_end();
+    !body.is_empty() && (body.bytes().all(|b| b == b'=') || body.bytes().all(|b| b == b'-'))
+}
+
+/// Opening fence: a run of three or more backticks or tildes.
+fn opens_fence(body: &str) -> Option<Fence> {
+    let marker = match body.as_bytes().first() {
+        Some(&b @ (b'`' | b'~')) => b,
+        _ => return None,
+    };
+    let len = body.bytes().take_while(|&b| b == marker).count();
+    if len < 3 {
+        return None;
+    }
+    // A backtick fence's info string may not contain a backtick, otherwise
+    // inline code spans would open blocks.
+    if marker == b'`' && body[len..].contains('`') {
+        return None;
+    }
+    Some(Fence { marker, len })
+}
+
+/// Closing fence: a run of the same marker, at least as long as the opener,
+/// with nothing but whitespace after it.
+fn closes_fence(body: &str, open: Fence) -> bool {
+    let len = body.bytes().take_while(|&b| b == open.marker).count();
+    len >= open.len && body[len..].trim().is_empty()
+}
+
+/// Index of the first line after YAML (`---`) or TOML (`+++`) front matter.
+/// Returns 0 when the document has none.
+fn front_matter_end(lines: &[&str]) -> usize {
+    let Some(first) = lines.first() else {
+        return 0;
+    };
+    let delim = match first.trim_end() {
+        "---" => "---",
+        "+++" => "+++",
+        _ => return 0,
+    };
+    lines
+        .iter()
+        .position(|l| l.trim_end() == delim && !std::ptr::eq(*l, *first))
+        .map_or(0, |close| close + 1)
 }
 
 #[cfg(test)]
@@ -101,6 +231,89 @@ mod tests {
         assert!(!is_header("####### Too many"));
         assert!(!is_header("Not a header"));
         assert!(!is_header(""));
+    }
+
+    #[test]
+    fn opens_fence_backticks_and_tildes() {
+        assert!(opens_fence("```").is_some());
+        assert!(opens_fence("```rust").is_some());
+        assert!(opens_fence("~~~").is_some());
+        assert!(opens_fence("````markdown").is_some());
+        assert!(opens_fence("``").is_none(), "two backticks is not a fence");
+        assert!(opens_fence("text").is_none());
+        assert!(
+            opens_fence("```a`b").is_none(),
+            "a backtick in the info string means this is not a fence opener"
+        );
+    }
+
+    #[test]
+    fn closes_fence_requires_same_marker_and_length() {
+        let open = opens_fence("````").unwrap();
+        assert!(!closes_fence("```", open), "shorter run must not close");
+        assert!(closes_fence("````", open));
+        assert!(closes_fence("`````", open), "longer run closes");
+        assert!(
+            !closes_fence("~~~~", open),
+            "different marker must not close"
+        );
+        assert!(
+            !closes_fence("````rust", open),
+            "a closing fence carries no info string"
+        );
+    }
+
+    #[test]
+    fn is_setext_underline_variants() {
+        assert!(is_setext_underline("===\n"));
+        assert!(is_setext_underline("---\n"));
+        assert!(is_setext_underline("=\n"));
+        assert!(!is_setext_underline("\n"));
+        assert!(!is_setext_underline("=-=\n"), "must be a uniform run");
+        assert!(!is_setext_underline("|---|---|\n"), "table separator");
+        assert!(
+            !is_setext_underline("    ---\n"),
+            "four spaces makes it an indented code block"
+        );
+    }
+
+    #[test]
+    fn front_matter_end_detects_yaml_and_toml() {
+        let yaml: Vec<&str> = "---\ntitle: x\n---\nbody\n".split_inclusive('\n').collect();
+        assert_eq!(front_matter_end(&yaml), 3);
+
+        let toml: Vec<&str> = "+++\ntitle = 'x'\n+++\nbody\n"
+            .split_inclusive('\n')
+            .collect();
+        assert_eq!(front_matter_end(&toml), 3);
+
+        let none: Vec<&str> = "# Title\nbody\n".split_inclusive('\n').collect();
+        assert_eq!(front_matter_end(&none), 0);
+
+        let unterminated: Vec<&str> = "---\ntitle: x\n".split_inclusive('\n').collect();
+        assert_eq!(
+            front_matter_end(&unterminated),
+            0,
+            "an unterminated block is not front matter"
+        );
+    }
+
+    #[test]
+    fn extract_sections_skips_fenced_content() {
+        let text = "# Title\ntext\n```\n# fake\n```\nmore\n";
+        let sections = extract_sections(text);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].0.as_deref(), Some("# Title"));
+        assert!(sections[0].1.contains("# fake"), "content is preserved");
+    }
+
+    #[test]
+    fn extract_sections_setext() {
+        let text = "Title\n=====\nbody\n";
+        let sections = extract_sections(text);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].0.as_deref(), Some("Title"));
+        assert_eq!(sections[0].1, "body\n");
     }
 
     #[test]
