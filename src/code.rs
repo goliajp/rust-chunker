@@ -133,13 +133,17 @@ def bravo():
     }
 
     #[test]
-    fn is_lossless_and_offsets_are_exact() {
+    fn offsets_are_exact_and_ordered() {
         let src = "fn a() {\n    one();\n}\n\nfn b() {\n    two();\n}\n";
         let chunks = split_code(src, 10, 0, encoder());
-        let rejoined: String = chunks.iter().map(|c| c.content.as_str()).collect();
-        assert_eq!(rejoined, src, "splitting must not lose or duplicate bytes");
         for c in &chunks {
             assert_eq!(&src[c.start_byte..c.end_byte], c.content);
+        }
+        for w in chunks.windows(2) {
+            assert!(
+                w[0].start_byte <= w[1].start_byte,
+                "chunks must be in document order"
+            );
         }
     }
 

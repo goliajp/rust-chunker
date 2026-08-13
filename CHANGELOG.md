@@ -5,6 +5,102 @@ All notable changes to this crate will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Upgrading from 1.x to 2.0 — migration
+
+Two mechanical renames and one API shape change.
+
+```rust
+// 1.x
+chunk.section.as_deref()          // Option<&str>
+Chunk { content, index, .. }      // struct literal
+
+// 2.0
+chunk.section()                   // Option<&str> — same value, now a method
+chunk.section_path                // Vec<String> — the full header ancestry
+Chunk::new(content).with_index(i) // Chunk is now #[non_exhaustive]
+```
+
+`.semantic(&client)` returns a `SemanticChunkBuilder`. If you were calling
+`.split()` on a semantic builder, that was a runtime panic in 1.x; it is now a
+compile error, and `.split_async()` is the method you want.
+
+If you are coming from 1.0.x rather than 1.1.0, read the 1.1.0 note below as
+well — chunk boundaries and token counts both moved there.
+
+## [2.0.0] - 2026-08-13
+
+### Added
+
+- **Token spans on every chunk** — `start_token` and `end_token` give the
+  chunk's range in the *document's* token stream. This is the entry ticket for
+  [late chunking](https://arxiv.org/abs/2409.04701): embed the document once,
+  then pool each chunk's vector over its own range, so every chunk embedding
+  carries whole-document context instead of only its own text. The splitter
+  already computed these boundaries internally and discarded them.
+
+  They are deliberately not the same number as `token_count`. `token_count` is
+  a fresh count of the chunk's own text — what `max_tokens` bounds and what you
+  budget a context window against. The span is the chunk's footprint in the
+  document stream. BPE merges across boundaries, and where a separator sits
+  inside a token the span widens to cover it, so consecutive spans can share
+  exactly one token. Both numbers are real and they answer different questions.
+
+- **Section hierarchy** — `section_path: Vec<String>` carries the full header
+  ancestry, so a `### From source` chunk knows it sits under `## Installation`
+  under `# Guide`. Previously a chunk knew only the one header line above it.
+  Setext headers carry levels too (`===` is 1, `---` is 2).
+
+- **`.code()`** — splits source in any language on blank lines, then on
+  brackets closing a block at column 0, then on lines. The prose separators are
+  deliberately skipped below the line tier: splitting code on `". "` cuts
+  inside string literals and doc comments.
+
+- **`.html()`** — splits after block-level closing tags (`</p>`, `</li>`,
+  `</section>`, headings, table rows, …), matched case-insensitively. Inline
+  tags are not boundaries, so a sentence is not cut mid-phrase.
+
+  Both are **boundary-aware, not AST/DOM-aware**, and both add zero
+  dependencies. Not pulling in tree-sitter is a decision, not an oversight: it
+  would mean a grammar crate per language in a crate whose entire dependency
+  surface is `tiktoken`. Where AST fidelity matters, the docs point at
+  tree-sitter based splitters by name.
+
+- **`Chunk::new` and `with_*` setters**, so downstream can still construct a
+  `Chunk` now that it is `#[non_exhaustive]` — for tests, and for adapters that
+  re-materialise chunks from storage.
+
+### Changed — breaking
+
+- **`Chunk` is `#[non_exhaustive]`.** Adding a metadata field used to be a
+  major version every single time; now it is not. This is the last such break.
+- **`section: Option<String>` → `section_path: Vec<String>`**, with a
+  `section()` method returning the deepest entry. One source of truth plus an
+  ergonomic accessor, rather than two fields that can disagree.
+- **`.semantic()` returns `SemanticChunkBuilder`**, which has no `.split()`.
+  Semantic splitting makes network calls, so the synchronous entry point does
+  not exist on it rather than existing and panicking. `.threshold()` moves to
+  this type; `.max_tokens()`, `.overlap()`, `.model()` and `.encoding()` are
+  available on both.
+- **Whitespace-only chunks are dropped.** A separator tier could strand a lone
+  `"\n"` between two oversized pieces; that chunk would then be embedded,
+  stored, and never usefully retrieved. Splitting is therefore not
+  byte-for-byte reconstructible — it already was not, since markdown keeps
+  header lines in metadata — but every surviving chunk's byte range still
+  addresses the source exactly.
+
+### Changed — internal
+
+- The recursive descent's shared state moves into a `Ctx`, retiring the
+  `too_many_arguments` allow and letting each strategy supply its own separator
+  ladder. Chunk numbering and the token-span pass are now done once at the top
+  level rather than in each strategy.
+
+### Docs
+
+- New `examples/token_spans.rs` (late chunking) and `examples/code_and_html.rs`.
+- The comparison table now names tree-sitter code splitting as something
+  text-splitter does and chunkedrs does not.
+
 ## Upgrading to 1.1.0 — chunk boundaries change
 
 1.1.0 adds no API, but it changes **where the cuts land and what
