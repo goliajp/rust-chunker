@@ -1,6 +1,6 @@
 [package]
 name = "chunkedrs"
-version = "2.0.0"
+version = "2.1.0"
 edition = "2024"
 description = "AI-native text chunking — recursive, markdown, code, HTML and semantic splitting with token-accurate boundaries and token spans for late chunking"
 license = "MIT"
@@ -19,17 +19,21 @@ readme = "README.md"
 # 3.8.0 fixed the o200k punctuation rule's missing `/` tail. 4.0.0 moved the
 # vocabularies behind features, which is what the `vocab-*` passthrough below
 # exists to forward. See tests/tokenizer_contract.rs, which pins the first two.
+# 4.1.1 is not needed by anything here — it is the floor the rest of the family
+# is on, and a shared floor keeps a `semantic` build from resolving two 4.x.
 #
 # `vocab-o200k_base` is not optional here: it is the encoder every unrecognised
 # model name falls back to, so `resolve_encoder` can never fail to find one.
 # Everything beyond it is the caller's choice.
-tiktoken = { version = "4", default-features = false, features = [
+tiktoken = { version = "4.1.1", default-features = false, features = [
     "vocab-o200k_base",
 ] }
-# 0.5 is a floor for the same reason: embedrs 0.5 is the first release to
-# depend on tiktoken 4, so anything older would pull a second major of it into
-# a build that enables `semantic` alongside embedrs `cost-tracking`.
-embedrs = { version = "0.5", optional = true }
+# 0.6 is a floor for the same reason: embedrs 0.6 is the release that moved to
+# tiktoken 4.1.1, so anything older would pull a second 4.x into a build that
+# enables `semantic` alongside embedrs `cost-tracking`. 0.6 also changes the
+# Voyage default to voyage-4-large, which is a `semantic` caller's concern only
+# if it embeds with Voyage and compares against a previously built index.
+embedrs = { version = "0.6", optional = true }
 
 [features]
 # Vocabularies are opt-out, mirroring tiktoken 4. The default is every one of
