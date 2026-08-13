@@ -45,7 +45,10 @@ fn canonical_crlf_is_not_split() {
 fn paragraph_breaks_are_not_overcounted() {
     let enc = tiktoken::get_encoding("o200k_base").unwrap();
     let joined = "alpha\n\nbravo\n\ncharlie";
-    let parts_sum: usize = ["alpha", "bravo", "charlie"].iter().map(|p| enc.count(p)).sum();
+    let parts_sum: usize = ["alpha", "bravo", "charlie"]
+        .iter()
+        .map(|p| enc.count(p))
+        .sum();
     // three words + two paragraph-break tokens
     assert_eq!(
         enc.count(joined),

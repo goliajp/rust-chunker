@@ -69,50 +69,32 @@ struct Sentence<'a> {
     byte_offset: usize,
 }
 
-/// split text into sentences (by `. `, `! `, `? `, or newlines)
+/// Split text into sentences.
+///
+/// Delegates to the recursive splitter's sentence tier so there is exactly one
+/// definition of "sentence boundary" in the crate. That tier covers CJK
+/// full-width terminals, which this function previously did not — Chinese and
+/// Japanese documents came back as a single sentence, which made every
+/// embedding comparison below degenerate into "one chunk".
 fn split_sentences(text: &str) -> Vec<Sentence<'_>> {
-    let mut sentences = Vec::new();
-    let mut start = 0;
+    // tier 0 = paragraph, 1 = line, 2 = sentence
+    const SENTENCE_TIER: usize = 2;
+    let seps: Vec<&str> = crate::recursive::SEPARATOR_TIERS[SENTENCE_TIER]
+        .iter()
+        .copied()
+        // A newline ends a sentence too, and the sentence tier does not carry
+        // one because the line tier ranks above it in the recursive ladder.
+        .chain([".\n", "!\n", "?\n", "\n"])
+        .collect();
 
-    let terminators = [". ", "! ", "? ", ".\n", "!\n", "?\n"];
-
-    let mut i = 0;
-    while i < text.len() {
-        let mut found = false;
-        for term in &terminators {
-            if text[i..].starts_with(term) {
-                let end = i + term.len();
-                let s = &text[start..end];
-                if !s.trim().is_empty() {
-                    sentences.push(Sentence {
-                        text: s,
-                        byte_offset: start,
-                    });
-                }
-                start = end;
-                i = end;
-                found = true;
-                break;
-            }
-        }
-        if !found {
-            // advance by one character, not one byte (multi-byte UTF-8 safety)
-            i += text[i..].chars().next().map_or(1, |c| c.len_utf8());
-        }
-    }
-
-    // remaining text
-    if start < text.len() {
-        let s = &text[start..];
-        if !s.trim().is_empty() {
-            sentences.push(Sentence {
-                text: s,
-                byte_offset: start,
-            });
-        }
-    }
-
-    sentences
+    crate::recursive::split_at_any(text, &seps)
+        .into_iter()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| Sentence {
+            byte_offset: crate::byte_offset_of(s, text),
+            text: s,
+        })
+        .collect()
 }
 
 /// find indices where cosine similarity between consecutive embeddings drops below threshold
@@ -257,14 +239,22 @@ mod tests {
     }
 
     #[test]
-    fn split_sentences_cjk_no_panic() {
-        // must not panic on multi-byte UTF-8 characters (regression test)
+    fn split_sentences_cjk_full_width_terminals() {
         let sentences = split_sentences("这是第一句。第二句在这里。最后一句。");
-        // CJK full-width period is not in the ASCII terminator list,
-        // so this returns 1 sentence — but must not panic
-        assert!(!sentences.is_empty());
+        assert_eq!(
+            sentences.iter().map(|s| s.text).collect::<Vec<_>>(),
+            vec!["这是第一句。", "第二句在这里。", "最后一句。"],
+        );
         for s in &sentences {
             assert!(!s.text.contains('\u{FFFD}'));
+        }
+    }
+
+    #[test]
+    fn split_sentences_cjk_offsets_address_original() {
+        let text = "第一句。第二句。第三句。";
+        for s in split_sentences(text) {
+            assert_eq!(&text[s.byte_offset..s.byte_offset + s.text.len()], s.text);
         }
     }
 
