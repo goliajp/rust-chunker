@@ -12,9 +12,11 @@
 ## 特性亮点
 
 - **Token 精确** — 每个分块严格保证不超过 token 上限，而非近似的字符数估算
-- **3 种策略** — 递归（快速通用）、Markdown 感知（保留标题结构）、语义分割（基于 embedding 的断点检测）
+- **5 种策略** — 递归、Markdown、代码、HTML、语义（基于 embedding）
+- **Token 区间** — 每个分块都知道自己在整篇文档 token 流中的位置，这正是 [late chunking](#late-chunking) 需要的
 - **中日文感知** — 中文和日文按 `。`、`！`、`？` 及子句标点切分，而不是按它们根本不用的 ASCII 空格
-- **丰富元数据** — 每个分块附带字节偏移、token 计数和章节标题
+- **章节层级** — `### 从源码安装` 的分块知道自己在 `## 安装` 之下、`# 指南` 之下
+- **丰富元数据** — 字节偏移、token 偏移、token 计数、标题祖先链
 - **重叠支持** — 可配置的 token 级重叠
 - **任意分词器** — 从模型名称自动检测，或直接指定 17 种编码之一
 - **基于 tiktoken 4** — 最快的纯 Rust BPE 分词器，覆盖 10 家厂商
@@ -33,20 +35,25 @@ chunkedrs 在**语义边界**（段落、句子、子句、单词）处分割，
 |---|---|---|
 | 默认计量单位 | 恒为 token | 字符；token 计量需另行配置 |
 | 分词器 | 内置 tiktoken | 通过 feature 接 `tiktoken-rs` 或 `tokenizers` |
-| Markdown | 标题作为分块元数据 | 按 CommonMark 结构分割 |
-| 代码（tree-sitter） | 无 | 有 |
+| Markdown | 标题祖先链作为分块元数据 | 按 CommonMark 结构分割 |
+| 代码 | 边界感知，零依赖 | **tree-sitter,真 AST** |
+| HTML | 边界感知，零依赖 | 无 |
+| Token 区间（late chunking 用） | 有 | 无 |
 | 基于 embedding 的语义分割 | 有（经 [embedrs](https://crates.io/crates/embedrs)） | 无 |
 | 字节偏移 | 有 | 有 |
 | 重叠 | 按 token | 跟随所配置的计量单位 |
+| 依赖数 | 1（`tiktoken`） | 代码分割需每语言一个 grammar crate |
 
-想要「不用配置就是 token 精确」、每块都带章节元数据、或基于 embedding 的断点检测，选 chunkedrs。需要切分源代码，选 text-splitter。
+想要「不用配置就是 token 精确」、每块都带标题祖先链、late chunking 用的 token 区间、或基于 embedding 的断点检测，选 chunkedrs。**需要真正的 AST 级代码分割，选 text-splitter** —— chunkedrs 的 `code()` 读的是标点不是语法，这一点它自己写明了。
 
 ## 分割策略
 
 | 策略 | 适用场景 | 速度 |
 |------|---------|------|
 | **递归分割**（默认） | 通用文本 — 按段落、句子、子句、单词 | 最快 |
-| **Markdown** | 含标题的文档 — 保留章节元数据 | 快 |
+| **Markdown** | 含标题的文档 — 保留章节祖先链 | 快 |
+| **代码** | 任意语言源码 — 空行、块结束符、行 | 快 |
+| **HTML** | 网页 — 块级标签边界 | 快 |
 | **语义分割** | 高质量 RAG — 基于 embedding 在语义边界分割 | 较慢（需 API 调用） |
 
 ## 快速开始
@@ -55,7 +62,7 @@ chunkedrs 在**语义边界**（段落、句子、子句、单词）处分割，
 
 ```toml
 [dependencies]
-chunkedrs = "1.1"
+chunkedrs = "2"
 ```
 
 使用默认配置分割文本（递归、512 最大 token、无重叠）：
@@ -87,12 +94,53 @@ assert!(chunks.iter().all(|c| c.token_count <= 256));
 ## Markdown 感知分割
 
 ```rust
-let markdown = "# 介绍\n\n一些文本。\n\n## 详情\n\n更多内容。\n";
+let markdown = "# 指南\n\n介绍。\n\n## 安装\n\n执行 cargo add。\n";
 let chunks = chunkedrs::chunk(markdown).markdown().split();
 
-// 每个分块知道它属于哪个章节
-assert_eq!(chunks[0].section.as_deref(), Some("# 介绍"));
+// 每个分块知道它属于哪个章节……
+assert_eq!(chunks[0].section(), Some("# 指南"));
+
+// ……以及完整的祖先链，嵌套章节因此保留上下文
+assert_eq!(chunks[1].section_path, ["# 指南", "## 安装"]);
 ```
+
+标题支持 ATX（`#`）和 setext（`===` / `---`）。围栏代码块整体跳过，所以 `bash` 块里的 `#` 注释就是注释；YAML 和 TOML front matter 不参与标题识别。
+
+## 代码与 HTML
+
+```rust
+let src = "fn a() {\n    one();\n}\n\nfn b() {\n    two();\n}\n";
+let chunks = chunkedrs::chunk(src).code().max_tokens(20).split();
+
+let page = "<h1>标题</h1><p>第一段。</p><p>第二段。</p>";
+let chunks = chunkedrs::chunk(page).html().max_tokens(10).split();
+```
+
+两者都是**边界感知,而非 AST 感知**。`code()` 依次按空行、列 0 上闭合块的括号、行来切,并刻意跳过散文分隔符 —— 因为按 `". "` 切代码会切进字符串字面量。`html()` 大小写不敏感地扫描块级闭合标签（`</p>`、`</li>`、`</section>` 等）,遇到畸形标记则退化到普通文本阶梯。
+
+两者都不做解析。这就是取舍:它们适用于任何语言、任何标记,且不引入任何依赖,但字符串字面量里的 `}` 在它看来就是块结束。需要 AST 保真度时,请用基于 tree-sitter 的分割器,例如 [text-splitter](https://crates.io/crates/text-splitter) 的 `CodeSplitter`。
+
+## Late chunking
+
+孤立地嵌入每个分块会丢失周围的上下文 —— 一个写着「它要 40 美元」的分块已经不知道「它」是什么了。[Late chunking](https://arxiv.org/abs/2409.04701) 把顺序反过来:先把整篇文档嵌入一次,再按每个分块自己那段 token 区间做池化。
+
+chunkedrs 提供的正是那段区间:
+
+```rust
+let doc = "First sentence here. Second sentence here. Third sentence here.";
+let chunks = chunkedrs::chunk(doc).max_tokens(8).split();
+
+let encoder = tiktoken::get_encoding("o200k_base").unwrap();
+let document_tokens = encoder.encode(doc);
+
+for chunk in &chunks {
+    // 真实管道里这里索引的是编码器的逐 token 隐状态
+    let span = &document_tokens[chunk.start_token..chunk.end_token];
+    assert!(!span.is_empty());
+}
+```
+
+不用重新分词,不用猜分块落在哪。见 [`examples/token_spans.rs`](examples/token_spans.rs)。
 
 ## 中日文文本
 
@@ -130,18 +178,27 @@ let chunks = chunkedrs::chunk("你的长文本...")
 
 ## 分块元数据
 
-每个 `Chunk` 携带丰富的元数据：
-
 ```rust
+#[non_exhaustive]
 pub struct Chunk {
-    pub content: String,         // 文本内容
-    pub index: usize,            // 在序列中的位置
-    pub start_byte: usize,       // 原文中的字节偏移
-    pub end_byte: usize,         // 字节偏移（不含）
-    pub token_count: usize,      // 精确的 token 数
-    pub section: Option<String>, // markdown 标题（如适用）
+    pub content: String,           // 文本内容
+    pub index: usize,              // 在序列中的位置
+    pub start_byte: usize,         // 原文中的字节偏移
+    pub end_byte: usize,           // 字节偏移（不含）
+    pub start_token: usize,        // 在文档 token 流中的偏移
+    pub end_token: usize,          // token 偏移（不含）
+    pub token_count: usize,        // 本分块单独计数的 token 数
+    pub section_path: Vec<String>, // 标题祖先链，由外到内
+}
+
+impl Chunk {
+    pub fn section(&self) -> Option<&str>;  // 最深一级标题
 }
 ```
+
+`token_count` 和 `end_token - start_token` 回答的是两个不同问题，可以不相等。`token_count` 是对分块本身的重新计数 —— `max_tokens` 约束的是它，你拿去算上下文窗口预算的也是它。区间则是这个分块在文档 token 流中的占位；当分隔符落在某个 token 内部时，区间会向外扩展去覆盖它，因此相邻区间可能共享一个 token。
+
+`Chunk` 标了 `#[non_exhaustive]`，以后再加元数据不会再是一次 major。手工构造用 `Chunk::new(...).with_bytes(..).with_tokens(..)`。
 
 ## 重叠
 
@@ -176,6 +233,25 @@ MiniMax（`minimax-m2`）。
 Anthropic 和 Google 没有公开 tiktoken 兼容的词表，所以 `claude-*` 和
 `gemini-*` **不会**匹配 —— 无法识别的名字会回落到 `o200k_base`，那是估算
 而非精确计数。需要显式固定这一行为时请用 `.encoding()`。
+
+## 从 1.x 升级
+
+两处机械改名，加一处 API 形态变化。
+
+```rust
+// 1.x
+chunk.section.as_deref()          // Option<&str>
+Chunk { content, index, .. }      // 结构体字面量
+
+// 2.0
+chunk.section()                   // Option<&str> —— 同一个值，现在是方法
+chunk.section_path                // Vec<String> —— 完整祖先链
+Chunk::new(content).with_index(i) // Chunk 已标 #[non_exhaustive]
+```
+
+`.semantic(&client)` 现在返回 `SemanticChunkBuilder`。如果你之前在它上面调 `.split()`，那在 1.x 里是运行时 panic；现在它是编译错误，你要的是 `.split_async()`。
+
+相对 1.0.x，分块边界会变 —— 原因见 [CHANGELOG](CHANGELOG.md)。重新分块、重新嵌入即可；字节偏移对原文依然精确。
 
 <!-- ECOSYSTEM BEGIN (generated — edit ecosystem.toml, not this block) -->
 

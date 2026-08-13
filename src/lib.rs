@@ -11,8 +11,33 @@
 //! | Strategy | Use case | Speed |
 //! |----------|----------|-------|
 //! | **Recursive** (default) | General text — paragraphs, sentences, clauses, words | Fastest |
-//! | **Markdown** | Documents with headers — preserves section metadata | Fast |
+//! | **Markdown** | Documents with headers — preserves section ancestry | Fast |
+//! | **Code** | Source in any language — blank lines, block closers, lines | Fast |
+//! | **HTML** | Web pages — block-level tag boundaries | Fast |
 //! | **Semantic** | High-quality RAG — splits at meaning boundaries via embeddings | Slower (API calls) |
+//!
+//! ## Late chunking
+//!
+//! Every chunk carries `start_token..end_token`: its range in the *document's*
+//! token stream. That is what [late chunking] needs — embed the document once,
+//! then pool each chunk's vector over its own range, so each chunk embedding
+//! carries the context of the whole document rather than only its own text.
+//!
+//! ```rust
+//! let doc = "First sentence here. Second sentence here. Third sentence here.";
+//! let chunks = chunkedrs::chunk(doc).max_tokens(8).split();
+//!
+//! let encoder = tiktoken::get_encoding("o200k_base").unwrap();
+//! let document_tokens = encoder.encode(doc);
+//!
+//! for chunk in &chunks {
+//!     // in a real pipeline this indexes the encoder's per-token hidden states
+//!     let span = &document_tokens[chunk.start_token..chunk.end_token];
+//!     assert!(!span.is_empty());
+//! }
+//! ```
+//!
+//! [late chunking]: https://arxiv.org/abs/2409.04701
 //!
 //! ## CJK text
 //!
@@ -55,11 +80,29 @@
 //! ## Markdown-aware splitting
 //!
 //! ```rust
-//! let markdown = "# Intro\n\nSome text.\n\n## Details\n\nMore text here.\n";
+//! let markdown = "# Guide\n\nIntro.\n\n## Install\n\nRun cargo add.\n";
 //! let chunks = chunkedrs::chunk(markdown).markdown().split();
 //!
-//! // each chunk knows which section it belongs to
-//! assert_eq!(chunks[0].section(), Some("# Intro"));
+//! // each chunk knows the section it belongs to...
+//! assert_eq!(chunks[0].section(), Some("# Guide"));
+//! // ...and its full ancestry, so nested sections keep their context
+//! assert_eq!(chunks[1].section_path, ["# Guide", "## Install"]);
+//! ```
+//!
+//! ## Code and HTML
+//!
+//! Both are boundary-aware rather than AST-aware: they scan for structural
+//! markers and parse nothing, so they apply to any language or markup and add
+//! no dependencies. Use a tree-sitter based splitter when you need real syntax.
+//!
+//! ```rust
+//! let src = "fn a() {\n    one();\n}\n\nfn b() {\n    two();\n}\n";
+//! let chunks = chunkedrs::chunk(src).code().max_tokens(20).split();
+//! assert!(!chunks.is_empty());
+//!
+//! let page = "<h1>Title</h1><p>First para.</p><p>Second para.</p>";
+//! let chunks = chunkedrs::chunk(page).html().max_tokens(10).split();
+//! assert!(chunks.len() >= 2);
 //! ```
 //!
 //! ## Semantic splitting
@@ -83,6 +126,23 @@ pub(crate) mod recursive;
 mod semantic;
 
 pub use chunk::Chunk;
+
+/// Final pass shared by every strategy: drop chunks with nothing in them,
+/// number what is left, and locate each one in the document's token stream.
+///
+/// Dropping whitespace-only chunks matters more than it sounds. A separator
+/// tier can leave a lone `"\n"` stranded between two oversized pieces, and that
+/// chunk would go on to be embedded, stored, and never usefully retrieved. The
+/// split is therefore not byte-for-byte reconstructible — it already was not,
+/// since the markdown strategy keeps header lines in metadata — but every
+/// surviving chunk's byte range still addresses the source exactly.
+fn finish(chunks: &mut Vec<Chunk>, text: &str, encoder: &tiktoken::CoreBpe) {
+    chunks.retain(|c| !c.content.trim().is_empty());
+    for (i, chunk) in chunks.iter_mut().enumerate() {
+        chunk.index = i;
+    }
+    assign_token_spans(chunks, text, encoder);
+}
 
 /// Fill in each chunk's `start_token..end_token` against the whole document.
 ///
@@ -404,7 +464,7 @@ impl<'a> ChunkBuilder<'a> {
             Strategy::Code => code::split_code(self.text, self.max_tokens, self.overlap, encoder),
             Strategy::Html => html::split_html(self.text, self.max_tokens, self.overlap, encoder),
         };
-        assign_token_spans(&mut chunks, self.text, encoder);
+        finish(&mut chunks, self.text, encoder);
         chunks
     }
 
@@ -494,7 +554,7 @@ impl<'a> SemanticChunkBuilder<'a> {
             self.threshold,
         )
         .await?;
-        assign_token_spans(&mut chunks, self.base.text, encoder);
+        finish(&mut chunks, self.base.text, encoder);
         Ok(chunks)
     }
 }

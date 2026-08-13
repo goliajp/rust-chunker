@@ -12,9 +12,11 @@ RAG パイプライン向けのトークン精度テキストチャンキング 
 ## 特徴
 
 - **トークン精度** — すべてのチャンクがトークン上限内であることを保証（文字数近似ではない）
-- **3 つの戦略** — 再帰（高速・汎用）、Markdown 対応（ヘッダー構造を保持）、セマンティック（embedding ベースのブレークポイント検出）
+- **5 つの戦略** — 再帰、Markdown、コード、HTML、セマンティック（embedding ベース）
+- **トークン区間** — 各チャンクが文書全体のトークン列における自分の範囲を知っている。[late chunking](#late-chunking) が必要とするのはこれ
 - **CJK 対応** — 日本語・中国語が使わない ASCII 空白ではなく、`。`・`！`・`？` と読点で分割
-- **豊富なメタデータ** — バイトオフセット、トークン数、セクションヘッダーを各チャンクに付与
+- **セクション階層** — `### ソースから` のチャンクは自分が `## インストール` の下、`# ガイド` の下にいることを知っている
+- **豊富なメタデータ** — バイトオフセット、トークンオフセット、トークン数、見出しの祖先チェーン
 - **オーバーラップ** — 設定可能なトークンオーバーラップ
 - **任意のトークナイザー** — モデル名から自動検出、または 17 種のエンコーディングを直接指定
 - **tiktoken 4 基盤** — 10 プロバイダーを網羅する最速の純 Rust BPE トークナイザー
@@ -33,20 +35,25 @@ chunkedrs は**意味的な境界**（段落、文、節、単語）で分割し
 |---|---|---|
 | デフォルトの計量単位 | 常にトークン | 文字。トークン計量は別途設定 |
 | トークナイザー | tiktoken を内蔵 | feature 経由で `tiktoken-rs` / `tokenizers` |
-| Markdown | ヘッダーをチャンクのメタデータに | CommonMark 構造で分割 |
-| コード（tree-sitter） | なし | あり |
+| Markdown | 見出しの祖先チェーンをメタデータに | CommonMark 構造で分割 |
+| コード | 境界ベース、依存ゼロ | **tree-sitter、本物の AST** |
+| HTML | 境界ベース、依存ゼロ | なし |
+| トークン区間（late chunking 用） | あり | なし |
 | embedding によるセマンティック分割 | あり（[embedrs](https://crates.io/crates/embedrs) 経由） | なし |
 | バイトオフセット | あり | あり |
 | オーバーラップ | トークン単位 | 設定した計量単位に従う |
+| 依存クレート数 | 1（`tiktoken`） | コード分割は言語ごとに grammar クレート |
 
-設定なしでトークン精度が欲しい、全チャンクにセクション情報が欲しい、embedding によるブレークポイントが欲しい場合は chunkedrs。ソースコードを分割したい場合は text-splitter。
+設定なしでトークン精度が欲しい、全チャンクに見出しの祖先チェーンが欲しい、late chunking 用のトークン区間が欲しい、embedding によるブレークポイントが欲しい場合は chunkedrs。**本物の AST ベースのコード分割が必要なら text-splitter** — chunkedrs の `code()` が読むのは構文ではなく約物であり、そのことを自ら明記しています。
 
 ## 分割戦略
 
 | 戦略 | ユースケース | 速度 |
 |------|------------|------|
 | **再帰分割**（デフォルト） | 一般テキスト — 段落、文、節、単語で分割 | 最速 |
-| **Markdown** | ヘッダー付きドキュメント — セクション情報を保持 | 高速 |
+| **Markdown** | ヘッダー付きドキュメント — セクションの祖先チェーンを保持 | 高速 |
+| **コード** | 任意言語のソース — 空行、ブロック終端、行 | 高速 |
+| **HTML** | ウェブページ — ブロックレベルタグの境界 | 高速 |
 | **セマンティック** | 高品質 RAG — embedding で意味境界を検出 | 低速（API 呼出） |
 
 ## クイックスタート
@@ -55,7 +62,7 @@ chunkedrs は**意味的な境界**（段落、文、節、単語）で分割し
 
 ```toml
 [dependencies]
-chunkedrs = "1.1"
+chunkedrs = "2"
 ```
 
 デフォルト設定で分割（再帰、最大 512 トークン、オーバーラップなし）：
@@ -87,12 +94,53 @@ assert!(chunks.iter().all(|c| c.token_count <= 256));
 ## Markdown 対応分割
 
 ```rust
-let markdown = "# はじめに\n\nテキスト。\n\n## 詳細\n\n追加コンテンツ。\n";
+let markdown = "# ガイド\n\nはじめに。\n\n## インストール\n\ncargo add を実行。\n";
 let chunks = chunkedrs::chunk(markdown).markdown().split();
 
-// 各チャンクが所属セクションを認識
-assert_eq!(chunks[0].section.as_deref(), Some("# はじめに"));
+// 各チャンクが所属セクションを認識し……
+assert_eq!(chunks[0].section(), Some("# ガイド"));
+
+// ……祖先チェーン全体も保持するので、入れ子のセクションが文脈を失わない
+assert_eq!(chunks[1].section_path, ["# ガイド", "## インストール"]);
 ```
+
+見出しは ATX（`#`）と setext（`===` / `---`）に対応。フェンス付きコードブロックは丸ごとスキップされるため、`bash` ブロック内の `#` はコメントのままです。YAML / TOML の front matter は見出し判定から除外されます。
+
+## コードと HTML
+
+```rust
+let src = "fn a() {\n    one();\n}\n\nfn b() {\n    two();\n}\n";
+let chunks = chunkedrs::chunk(src).code().max_tokens(20).split();
+
+let page = "<h1>タイトル</h1><p>第一段落。</p><p>第二段落。</p>";
+let chunks = chunkedrs::chunk(page).html().max_tokens(10).split();
+```
+
+どちらも **境界ベースであり、AST ベースではありません**。`code()` は空行 → 桁 0 でブロックを閉じる括弧 → 行 の順で分割し、散文用の区切りは意図的に使いません（`". "` でコードを切ると文字列リテラルの内部を切ってしまうため）。`html()` はブロックレベルの終了タグ（`</p>`、`</li>`、`</section>` など）を大文字小文字を区別せずに走査し、壊れたマークアップでは通常のテキスト階層に退化します。
+
+いずれも解析は行いません。これがトレードオフです。任意の言語・任意のマークアップで動作し依存を一切増やしませんが、文字列リテラル内の `}` はブロック終端に見えます。AST の忠実さが必要な場合は、[text-splitter](https://crates.io/crates/text-splitter) の `CodeSplitter` など tree-sitter ベースの分割器をお使いください。
+
+## Late chunking
+
+各チャンクを単独で埋め込むと周囲の文脈が失われます — 「それは 40 ドルです」というチャンクは、もう「それ」が何だったかを知りません。[Late chunking](https://arxiv.org/abs/2409.04701) は順序を逆にします。まず文書全体を一度埋め込み、そのあと各チャンク自身のトークン区間でプーリングします。
+
+chunkedrs が提供するのはその区間です：
+
+```rust
+let doc = "First sentence here. Second sentence here. Third sentence here.";
+let chunks = chunkedrs::chunk(doc).max_tokens(8).split();
+
+let encoder = tiktoken::get_encoding("o200k_base").unwrap();
+let document_tokens = encoder.encode(doc);
+
+for chunk in &chunks {
+    // 実際のパイプラインではエンコーダーのトークン単位の隠れ状態を参照する
+    let span = &document_tokens[chunk.start_token..chunk.end_token];
+    assert!(!span.is_empty());
+}
+```
+
+再トークン化も、チャンクの着地点の推測も不要です。[`examples/token_spans.rs`](examples/token_spans.rs) を参照。
 
 ## 日本語・中国語テキスト
 
@@ -128,18 +176,27 @@ let chunks = chunkedrs::chunk("長いテキスト...")
 
 ## チャンクメタデータ
 
-各 `Chunk` にはメタデータが付与されます：
-
 ```rust
+#[non_exhaustive]
 pub struct Chunk {
-    pub content: String,         // テキスト内容
-    pub index: usize,            // シーケンス内の位置
-    pub start_byte: usize,       // 原文中のバイトオフセット
-    pub end_byte: usize,         // バイトオフセット（排他）
-    pub token_count: usize,      // 正確なトークン数
-    pub section: Option<String>, // markdown ヘッダー（該当時）
+    pub content: String,           // テキスト内容
+    pub index: usize,              // シーケンス内の位置
+    pub start_byte: usize,         // 原文中のバイトオフセット
+    pub end_byte: usize,           // バイトオフセット（排他）
+    pub start_token: usize,        // 文書のトークン列におけるオフセット
+    pub end_token: usize,          // トークンオフセット（排他）
+    pub token_count: usize,        // このチャンク単独でのトークン数
+    pub section_path: Vec<String>, // 見出しの祖先チェーン、外側から順に
+}
+
+impl Chunk {
+    pub fn section(&self) -> Option<&str>;  // 最も深い見出し
 }
 ```
+
+`token_count` と `end_token - start_token` は別の問いに答えるもので、一致しないことがあります。`token_count` はチャンク自身を数え直した値 — `max_tokens` が制約するのも、コンテキストウィンドウの予算に使うのもこちらです。区間のほうは文書のトークン列におけるこのチャンクの占有範囲で、区切り文字がトークンの内部に落ちる場合はそれを覆うように広がります。そのため隣接する区間が 1 トークンを共有することがあります。
+
+`Chunk` は `#[non_exhaustive]` なので、今後メタデータを追加してもメジャーバージョンにはなりません。手で組み立てる場合は `Chunk::new(...).with_bytes(..).with_tokens(..)` を使ってください。
 
 ## オーバーラップ
 
@@ -169,6 +226,25 @@ let chunks = chunkedrs::chunk(text).encoding("cl100k_base").split();
 モデル名は OpenAI、Meta（`llama-3.1-70b`）、DeepSeek（`deepseek-v4`）、Alibaba（`qwen2.5-72b`）、Mistral、Moonshot（`kimi-k2`）、Zhipu（`glm-5`）、MiniMax（`minimax-m2`）に対応します。
 
 Anthropic と Google は tiktoken 互換の語彙を公開していないため、`claude-*` と `gemini-*` は **解決されません**。認識されない名前は `o200k_base` にフォールバックし、正確なカウントではなく近似値になります。この挙動を明示的に固定したい場合は `.encoding()` を使ってください。
+
+## 1.x からの移行
+
+機械的な改名が 2 つと、API 形状の変更が 1 つです。
+
+```rust
+// 1.x
+chunk.section.as_deref()          // Option<&str>
+Chunk { content, index, .. }      // 構造体リテラル
+
+// 2.0
+chunk.section()                   // Option<&str> — 同じ値、メソッドになった
+chunk.section_path                // Vec<String> — 祖先チェーン全体
+Chunk::new(content).with_index(i) // Chunk は #[non_exhaustive]
+```
+
+`.semantic(&client)` は `SemanticChunkBuilder` を返すようになりました。これに対して `.split()` を呼んでいた場合、1.x では実行時 panic でしたが、いまはコンパイルエラーです。必要なのは `.split_async()` です。
+
+1.0.x と比べてチャンク境界は変わります — 理由は [CHANGELOG](CHANGELOG.md) を参照してください。再チャンク化と再埋め込みを行ってください。バイトオフセットは原文に対して正確なままです。
 
 <!-- ECOSYSTEM BEGIN (generated — edit ecosystem.toml, not this block) -->
 
