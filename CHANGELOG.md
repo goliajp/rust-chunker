@@ -27,6 +27,31 @@ compile error, and `.split_async()` is the method you want.
 If you are coming from 1.0.x rather than 1.1.0, read the 1.1.0 note below as
 well — chunk boundaries and token counts both moved there.
 
+## [2.1.0] - 2026-08-13
+
+### Changed
+
+- **`embedrs` floor raised to 0.6** (the `semantic` feature). 0.6 is the
+  release that moved to tiktoken 4.1.1, so an older one would pull a second
+  4.x into a `semantic` + `cost-tracking` build. Note 0.6 also changes the
+  Voyage default to `voyage-4-large`.
+- **`tiktoken` floor raised to 4.1.1.** Nothing here needs it — this crate uses
+  the encodings, not the price table. It is the floor the rest of the family is
+  on, and a shared floor keeps a `semantic` build (which pulls embedrs) from
+  resolving two different 4.x.
+- Documentation examples name a current model (`gpt-5.6-terra`) rather than
+  `gpt-4o`. No behavior change — `gpt-4o` still resolves, and the tests that
+  exercise the `gpt-4o` → `o200k_base` mapping still name it deliberately.
+
+### Testing
+
+- `advertised_models_resolve` pins the 2026 GPT-5.x SKUs (`gpt-5.6-sol` /
+  `-terra` / `-luna`, `gpt-5.5`, `gpt-5.4`, `o4-mini`). They resolve through
+  the `gpt-5` prefix rather than entries of their own, which is by design but
+  is exactly the kind of thing that silently stops holding — and `.model()`
+  falls back to `o200k_base` without an error, so the failure mode is wrong
+  token counts rather than a crash.
+
 ## [2.0.0] - 2026-08-13
 
 ### Added

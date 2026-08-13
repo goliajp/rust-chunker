@@ -77,7 +77,17 @@ fn advertised_models_resolve() {
     for model in [
         "gpt-4o",
         "gpt-5",
+        // the 2026 GPT-5.x SKUs resolve through the "gpt-5" prefix rather than
+        // an entry of their own. That is by design, but it is exactly the kind
+        // of thing that silently stops being true, and the failure mode here
+        // is wrong token counts, not an error.
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.5",
+        "gpt-5.4",
         "o3",
+        "o4-mini",
         "llama-3.1-70b",
         "qwen2.5-72b",
         "deepseek-v4",
