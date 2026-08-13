@@ -1,6 +1,6 @@
 [package]
 name = "chunkedrs"
-version = "1.0.4"
+version = "1.1.0"
 edition = "2024"
 description = "AI-native text chunking — recursive, markdown-aware, and semantic splitting with token-accurate boundaries"
 license = "MIT"
@@ -13,13 +13,17 @@ categories = ["text-processing"]
 readme = "README.md"
 
 [dependencies]
-# 3.8 is a floor, not a preference: 3.6.0 fixed a pre-tokenizer bug that split
+# 4 is a floor, not a preference: 3.6.0 fixed a pre-tokenizer bug that split
 # canonical newline runs, and `"\n\n"` is this crate's top-priority separator —
 # every paragraph break in every document was overcounted by one token below it.
 # 3.8.0 fixed the o200k punctuation rule's missing `/` tail. See
-# tests/tokenizer_contract.rs, which pins both.
-tiktoken = "3.8"
-embedrs = { version = "0.4", optional = true }
+# tests/tokenizer_contract.rs, which pins both. 4.0.0 changed no token ids and
+# no signatures; it moved the vocabularies behind default-on features, which
+# this release does not opt out of.
+tiktoken = "4"
+# embedrs 0.5 is the first release on tiktoken 4; anything older would pull a
+# second major of it into a build that also enables embedrs `cost-tracking`.
+embedrs = { version = "0.5", optional = true }
 
 [features]
 default = []

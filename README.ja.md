@@ -4,7 +4,6 @@
 [![docs.rs](https://img.shields.io/docsrs/chunkedrs?style=flat-square&logo=docs.rs)](https://docs.rs/chunkedrs)
 [![License](https://img.shields.io/crates/l/chunkedrs?style=flat-square)](LICENSE)
 [![Downloads](https://img.shields.io/crates/d/chunkedrs?style=flat-square)](https://crates.io/crates/chunkedrs)
-[![MSRV](https://img.shields.io/badge/MSRV-1.94-blue?style=flat-square)](https://www.rust-lang.org)
 
 [English](README.md) | [简体中文](README.zh-CN.md) | **日本語**
 
@@ -14,34 +13,40 @@ RAG パイプライン向けのトークン精度テキストチャンキング 
 
 - **トークン精度** — すべてのチャンクがトークン上限内であることを保証（文字数近似ではない）
 - **3 つの戦略** — 再帰（高速・汎用）、Markdown 対応（ヘッダー構造を保持）、セマンティック（embedding ベースのブレークポイント検出）
+- **CJK 対応** — 日本語・中国語が使わない ASCII 空白ではなく、`。`・`！`・`？` と読点で分割
 - **豊富なメタデータ** — バイトオフセット、トークン数、セクションヘッダーを各チャンクに付与
-- **オーバーラップ** — 検索コンテキスト保持のための設定可能なトークンオーバーラップ
-- **任意のトークナイザー** — モデル名から自動検出（`gpt-4o`、`claude`、`llama`）またはエンコーディングを直接指定
-- **tiktoken 基盤** — 主要 LLM 全 9 エンコーディングに対応する最速の純 Rust BPE トークナイザー
+- **オーバーラップ** — 設定可能なトークンオーバーラップ
+- **任意のトークナイザー** — モデル名から自動検出、または 17 種のエンコーディングを直接指定
+- **tiktoken 4 基盤** — 10 プロバイダーを網羅する最速の純 Rust BPE トークナイザー
 
 ## なぜ chunkedrs？
 
 RAG パイプラインでは、テキストをモデルのコンテキストウィンドウに収まるチャンクに分割する必要があります。文字数や固定サイズでの単純な分割は、単語、文、段落の途中で切断され、意味が壊れ、検索品質が低下します。
 
-chunkedrs は**意味的な境界**（段落、文、単語）で分割しつつ、**正確なトークン制限**を保証します。`max_tokens` を超えるチャンクは生成されません。
+chunkedrs は**意味的な境界**（段落、文、節、単語）で分割しつつ、**正確なトークン制限**を保証します。`max_tokens` を超えるチャンクは生成されません。
 
-| 機能 | chunkedrs | text-splitter | 手動実装 |
-|------|-----------|---------------|---------|
-| トークン精度の制限 | あり（tiktoken） | 文字数ベース | なし |
-| 再帰分割 | あり | あり | 自前実装 |
-| Markdown 対応 | あり（セクション情報付き） | なし | 自前実装 |
-| セマンティック分割 | あり（embedrs 経由） | なし | 自前実装 |
-| バイトオフセット | あり | なし | 自前実装 |
-| チャンク毎トークン数 | あり | なし | 自前実装 |
-| オーバーラップ | トークンレベル | 文字レベル | 自前実装 |
-| トークナイザー選択 | モデル名またはエンコーディング | 非対応 | 非対応 |
+### [text-splitter](https://crates.io/crates/text-splitter) との比較
+
+どちらも良いライブラリで、狙うデフォルトが違います。text-splitter はより広いツールキットで、tree-sitter によるコード分割を備えています（chunkedrs にはありません）。
+
+| | chunkedrs | text-splitter 0.32 |
+|---|---|---|
+| デフォルトの計量単位 | 常にトークン | 文字。トークン計量は別途設定 |
+| トークナイザー | tiktoken を内蔵 | feature 経由で `tiktoken-rs` / `tokenizers` |
+| Markdown | ヘッダーをチャンクのメタデータに | CommonMark 構造で分割 |
+| コード（tree-sitter） | なし | あり |
+| embedding によるセマンティック分割 | あり（[embedrs](https://crates.io/crates/embedrs) 経由） | なし |
+| バイトオフセット | あり | あり |
+| オーバーラップ | トークン単位 | 設定した計量単位に従う |
+
+設定なしでトークン精度が欲しい、全チャンクにセクション情報が欲しい、embedding によるブレークポイントが欲しい場合は chunkedrs。ソースコードを分割したい場合は text-splitter。
 
 ## 分割戦略
 
 | 戦略 | ユースケース | 速度 |
 |------|------------|------|
-| **再帰分割**（デフォルト） | 一般テキスト — 段落、文、単語で分割 | 最速 |
-| **Markdown** | `#` ヘッダー付きドキュメント — セクション情報を保持 | 高速 |
+| **再帰分割**（デフォルト） | 一般テキスト — 段落、文、節、単語で分割 | 最速 |
+| **Markdown** | ヘッダー付きドキュメント — セクション情報を保持 | 高速 |
 | **セマンティック** | 高品質 RAG — embedding で意味境界を検出 | 低速（API 呼出） |
 
 ## クイックスタート
@@ -50,7 +55,7 @@ chunkedrs は**意味的な境界**（段落、文、単語）で分割しつつ
 
 ```toml
 [dependencies]
-chunkedrs = "1"
+chunkedrs = "1.1"
 ```
 
 デフォルト設定で分割（再帰、最大 512 トークン、オーバーラップなし）：
@@ -63,7 +68,7 @@ for chunk in &chunks {
     println!("[{}] {} tokens (bytes {}..{})", chunk.index, chunk.token_count, chunk.start_byte, chunk.end_byte);
 }
 // 出力:
-// [0] 5 tokens (bytes 0..22)
+// [0] 6 tokens (bytes 0..21)
 ```
 
 ## トークン精度の分割
@@ -89,13 +94,27 @@ let chunks = chunkedrs::chunk(markdown).markdown().split();
 assert_eq!(chunks[0].section.as_deref(), Some("# はじめに"));
 ```
 
+## 日本語・中国語テキスト
+
+日本語と中国語は句点のあとに空白を置かないため、区切り文字がすべて ASCII 空白で終わる分割器は境界を一つも見つけられず、単語の途中で切ってしまいます。chunkedrs はこれらの文字体系が実際に使う記号で分割し、閉じ括弧はそれが閉じる文と一緒に保ちます：
+
+```rust
+let ja = "彼は「今日はいい天気ですね。」と言いました。彼女は「本当にそうですね。」と答えました。";
+let chunks = chunkedrs::chunk(ja).max_tokens(14).split();
+
+assert_eq!(chunks[0].content, "彼は「今日はいい天気ですね。」と言いました。");
+assert_eq!(chunks[1].content, "彼女は「本当にそうですね。」と答えました。");
+```
+
+一文が収まらない場合は読点（`、`・`，`・`；`）が次の境界となり、そこで初めてトークンオフセットにフォールバックします。
+
 ## セマンティック分割
 
 `semantic` feature を有効にすると、embedding を使って意味境界で分割：
 
 ```toml
 [dependencies]
-chunkedrs = { version = "1", features = ["semantic"] }
+chunkedrs = { version = "1.1", features = ["semantic"] }
 ```
 
 ```rust,ignore
@@ -124,7 +143,7 @@ pub struct Chunk {
 
 ## オーバーラップ
 
-連続チャンク間のトークンオーバーラップにより、境界でのコンテキストが保持されます — 検索品質に不可欠：
+連続チャンク間のトークンオーバーラップは、境界を越えてコンテキストを運びます：
 
 ```rust
 let chunks = chunkedrs::chunk("長いテキスト...")
@@ -133,17 +152,23 @@ let chunks = chunkedrs::chunk("長いテキスト...")
     .split();
 ```
 
+オーバーラップが効くかどうかはワークロード次第です。近年の検索評価では、計測可能な効果はほとんど報告されない一方、インデックスサイズのコストは実在します。デフォルトは無効です。有効にする前に計測してください。
+
 ## トークナイザーの選択
 
 ```rust
 // モデル名から自動検出
 let chunks = chunkedrs::chunk(text).model("gpt-4o").split();
 
-// エンコーディングを直接指定
+// 17 種のエンコーディングを直接指定
 let chunks = chunkedrs::chunk(text).encoding("cl100k_base").split();
 
-// デフォルト：o200k_base（GPT-4o, GPT-4-turbo）
+// デフォルト：o200k_base（GPT-4o, GPT-5, o シリーズ）
 ```
+
+モデル名は OpenAI、Meta（`llama-3.1-70b`）、DeepSeek（`deepseek-v4`）、Alibaba（`qwen2.5-72b`）、Mistral、Moonshot（`kimi-k2`）、Zhipu（`glm-5`）、MiniMax（`minimax-m2`）に対応します。
+
+Anthropic と Google は tiktoken 互換の語彙を公開していないため、`claude-*` と `gemini-*` は **解決されません**。認識されない名前は `o200k_base` にフォールバックし、正確なカウントではなく近似値になります。この挙動を明示的に固定したい場合は `.encoding()` を使ってください。
 
 <!-- ECOSYSTEM BEGIN (generated — edit ecosystem.toml, not this block) -->
 

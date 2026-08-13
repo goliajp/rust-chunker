@@ -4,7 +4,6 @@
 [![docs.rs](https://img.shields.io/docsrs/chunkedrs?style=flat-square&logo=docs.rs)](https://docs.rs/chunkedrs)
 [![License](https://img.shields.io/crates/l/chunkedrs?style=flat-square)](LICENSE)
 [![Downloads](https://img.shields.io/crates/d/chunkedrs?style=flat-square)](https://crates.io/crates/chunkedrs)
-[![MSRV](https://img.shields.io/badge/MSRV-1.94-blue?style=flat-square)](https://www.rust-lang.org)
 
 **English** | [简体中文](README.zh-CN.md) | [日本語](README.ja.md)
 
@@ -14,34 +13,40 @@ Token-accurate text chunking for RAG pipelines — recursive, markdown-aware, an
 
 - **Token-accurate** — every chunk is guaranteed within your token budget, not character-approximate
 - **3 strategies** — recursive (fast, general), markdown-aware (preserves headers), semantic (embedding-based breakpoints)
+- **CJK-aware** — Chinese and Japanese split on `。`, `！`, `？` and clause marks, not on the ASCII space they do not use
 - **Rich metadata** — byte offsets, token counts, and section headers on every chunk
-- **Overlap** — configurable token overlap between chunks for retrieval context preservation
-- **Any tokenizer** — auto-detect from model name (`gpt-4o`, `claude`, `llama`) or specify encoding directly
-- **Built on tiktoken** — the fastest pure-Rust BPE tokenizer with 9 encodings across all major LLMs
+- **Overlap** — configurable token overlap between chunks
+- **Any tokenizer** — auto-detect from model name or specify one of 17 encodings directly
+- **Built on tiktoken 4** — the fastest pure-Rust BPE tokenizer, covering 10 providers
 
 ## Why chunkedrs?
 
 RAG pipelines need text split into chunks that fit model context windows. Naive splitting (by character count or fixed size) breaks mid-word, mid-sentence, or mid-paragraph — destroying meaning and hurting retrieval quality.
 
-chunkedrs splits at **semantic boundaries** (paragraphs, sentences, words) while enforcing **exact token limits**. No chunk ever exceeds `max_tokens`.
+chunkedrs splits at **semantic boundaries** (paragraphs, sentences, clauses, words) while enforcing **exact token limits**. No chunk ever exceeds `max_tokens`.
 
-| Feature | chunkedrs | text-splitter | Manual |
-|---------|-----------|---------------|--------|
-| Token-accurate limits | Yes (tiktoken) | Character-based | No |
-| Recursive splitting | Yes | Yes | DIY |
-| Markdown-aware | Yes (section metadata) | No | DIY |
-| Semantic splitting | Yes (via embedrs) | No | DIY |
-| Byte offsets | Yes | No | DIY |
-| Token count per chunk | Yes | No | DIY |
-| Overlap support | Token-level | Character-level | DIY |
-| Tokenizer selection | Model name or encoding | N/A | N/A |
+### Compared to [text-splitter](https://crates.io/crates/text-splitter)
+
+Both are good at this; they aim at different defaults. text-splitter is the broader toolkit — it has tree-sitter code splitting, which chunkedrs does not.
+
+| | chunkedrs | text-splitter 0.32 |
+|---|---|---|
+| Default sizing | Tokens, always | Characters; token sizing is opt-in |
+| Tokenizer | tiktoken, built in | `tiktoken-rs` or `tokenizers`, via feature |
+| Markdown | Headers as chunk metadata | CommonMark-structured splitting |
+| Code (tree-sitter) | No | Yes |
+| Embedding-based semantic splitting | Yes (via [embedrs](https://crates.io/crates/embedrs)) | No |
+| Byte offsets | Yes | Yes |
+| Overlap | Tokens | Follows the configured sizer |
+
+Reach for chunkedrs when you want token accuracy without configuring it, section metadata on every chunk, or embedding-based breakpoints. Reach for text-splitter when you need to chunk source code.
 
 ## Strategies
 
 | Strategy | Use case | Speed |
 |----------|----------|-------|
-| **Recursive** (default) | General text — paragraphs, sentences, words | Fastest |
-| **Markdown** | Documents with `#` headers — preserves section metadata | Fast |
+| **Recursive** (default) | General text — paragraphs, sentences, clauses, words | Fastest |
+| **Markdown** | Documents with headers — preserves section metadata | Fast |
 | **Semantic** | High-quality RAG — splits at meaning boundaries via embeddings | Slower (API calls) |
 
 ## Quick start
@@ -50,7 +55,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-chunkedrs = "1"
+chunkedrs = "1.1"
 ```
 
 Split text with defaults (recursive, 512 max tokens, no overlap):
@@ -63,7 +68,7 @@ for chunk in &chunks {
     println!("[{}] {} tokens (bytes {}..{})", chunk.index, chunk.token_count, chunk.start_byte, chunk.end_byte);
 }
 // Output:
-// [0] 4 tokens (bytes 0..21)
+// [0] 5 tokens (bytes 0..22)
 ```
 
 ## Token-accurate splitting
@@ -89,13 +94,31 @@ let chunks = chunkedrs::chunk(markdown).markdown().split();
 assert_eq!(chunks[0].section.as_deref(), Some("# Intro"));
 ```
 
+## CJK text
+
+Chinese and Japanese do not put a space after a sentence mark, so a splitter
+whose separators all end in an ASCII space finds no boundary at all and cuts
+mid-word. chunkedrs splits on the marks these scripts actually use, and keeps
+closing quotes with the sentence they close:
+
+```rust
+let zh = "他说「今天天气很好。」然后就出门了。她回答说「确实不错。」于是也跟着出去了。";
+let chunks = chunkedrs::chunk(zh).max_tokens(12).split();
+
+assert_eq!(chunks[0].content, "他说「今天天气很好。」");
+assert_eq!(chunks[1].content, "然后就出门了。");
+```
+
+When a whole sentence will not fit, the clause marks (`，`、`、`、`；`) are the
+next boundary down, and only then does it fall back to token offsets.
+
 ## Semantic splitting
 
 With the `semantic` feature enabled, split at meaning boundaries using embeddings:
 
 ```toml
 [dependencies]
-chunkedrs = { version = "1", features = ["semantic"] }
+chunkedrs = { version = "1.1", features = ["semantic"] }
 ```
 
 ```rust,ignore
@@ -124,7 +147,7 @@ pub struct Chunk {
 
 ## Overlap
 
-Token overlap between consecutive chunks preserves context at boundaries — critical for retrieval quality:
+Token overlap between consecutive chunks carries context across boundaries:
 
 ```rust
 let chunks = chunkedrs::chunk("your long text here...")
@@ -133,17 +156,30 @@ let chunks = chunkedrs::chunk("your long text here...")
     .split();
 ```
 
+Whether overlap helps is workload-dependent — recent retrieval evaluations
+report little measurable benefit against a real cost in index size. It is off
+by default; measure before turning it on.
+
 ## Tokenizer selection
 
 ```rust
 // auto-detect from model name
 let chunks = chunkedrs::chunk(text).model("gpt-4o").split();
 
-// or specify encoding directly
+// or specify one of the 17 encodings directly
 let chunks = chunkedrs::chunk(text).encoding("cl100k_base").split();
 
-// default: o200k_base (GPT-4o, GPT-4-turbo)
+// default: o200k_base (GPT-4o, GPT-5, o-series)
 ```
+
+Model names resolve across OpenAI, Meta (`llama-3.1-70b`), DeepSeek
+(`deepseek-v4`), Alibaba (`qwen2.5-72b`), Mistral, Moonshot (`kimi-k2`), Zhipu
+(`glm-5`) and MiniMax (`minimax-m2`).
+
+Anthropic and Google do not publish tiktoken-compatible vocabularies, so
+`claude-*` and `gemini-*` do **not** resolve — an unrecognised name falls back
+to `o200k_base`, which is an approximation rather than an exact count. Use
+`.encoding()` if you need to pin that behaviour explicitly.
 
 <!-- ECOSYSTEM BEGIN (generated — edit ecosystem.toml, not this block) -->
 
