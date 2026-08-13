@@ -6,7 +6,7 @@
 //! appear in essentially every technical document.
 
 fn sections(chunks: &[chunkedrs::Chunk]) -> Vec<Option<&str>> {
-    chunks.iter().map(|c| c.section.as_deref()).collect()
+    chunks.iter().map(|c| c.section()).collect()
 }
 
 /// A `#` comment inside a fenced code block is a comment, not a header.

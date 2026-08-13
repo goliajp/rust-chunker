@@ -49,7 +49,7 @@ all mainstream LLM tokenizers including GPT-4o, Claude, Llama, and DeepSeek.
     );
 
     for chunk in &chunks {
-        let section = chunk.section.as_deref().unwrap_or("(no header)");
+        let section = chunk.section().unwrap_or("(no header)");
         println!(
             "chunk {} | section: {:<25} | tokens: {:>2} | bytes: {}..{}",
             chunk.index, section, chunk.token_count, chunk.start_byte, chunk.end_byte,
@@ -62,7 +62,7 @@ all mainstream LLM tokenizers including GPT-4o, Claude, Llama, and DeepSeek.
     }
 
     // verify every chunk has section metadata (except preamble before first header)
-    let with_section = chunks.iter().filter(|c| c.section.is_some()).count();
+    let with_section = chunks.iter().filter(|c| c.section().is_some()).count();
     println!(
         "{} of {} chunks have section metadata",
         with_section,

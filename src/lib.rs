@@ -59,7 +59,7 @@
 //! let chunks = chunkedrs::chunk(markdown).markdown().split();
 //!
 //! // each chunk knows which section it belongs to
-//! assert_eq!(chunks[0].section.as_deref(), Some("# Intro"));
+//! assert_eq!(chunks[0].section(), Some("# Intro"));
 //! ```
 //!
 //! ## Semantic splitting
@@ -75,12 +75,65 @@
 //! ```
 
 mod chunk;
+mod code;
+mod html;
 mod markdown;
 pub(crate) mod recursive;
 #[cfg(feature = "semantic")]
 mod semantic;
 
 pub use chunk::Chunk;
+
+/// Fill in each chunk's `start_token..end_token` against the whole document.
+///
+/// The splitters work on slices and cannot see the document's token stream, so
+/// this runs once at the end: encode the document, build a prefix sum of token
+/// byte lengths, and binary-search each chunk's byte range into token indices.
+///
+/// Where a chunk boundary falls inside a token — possible whenever a separator
+/// sits mid-token — the span widens to the covering range. That is the right
+/// direction for the use this enables: [late chunking] pools a chunk's
+/// embedding over its token range, and a range that covers the chunk is
+/// correct while one that clips it is not.
+///
+/// [late chunking]: https://arxiv.org/abs/2409.04701
+fn assign_token_spans(chunks: &mut [Chunk], text: &str, encoder: &tiktoken::CoreBpe) {
+    if chunks.is_empty() {
+        return;
+    }
+
+    let tokens = encoder.encode(text);
+    // byte offset at which each token starts; one extra entry for the end
+    let mut starts = Vec::with_capacity(tokens.len() + 1);
+    let mut acc = 0usize;
+    for &t in &tokens {
+        starts.push(acc);
+        acc += encoder.decode(&[t]).len();
+    }
+    starts.push(acc);
+
+    // index of the token containing `byte`, or the token count if past the end
+    let token_containing = |byte: usize| -> usize {
+        match starts.binary_search(&byte) {
+            Ok(i) => i,
+            // partition_point-style: the insertion point is one past the
+            // token whose range covers this byte
+            Err(i) => i.saturating_sub(1),
+        }
+    };
+
+    for chunk in chunks {
+        let start = token_containing(chunk.start_byte).min(tokens.len());
+        // `end_byte` is exclusive, so locate the last byte the chunk owns
+        let end = if chunk.end_byte > chunk.start_byte {
+            (token_containing(chunk.end_byte - 1) + 1).min(tokens.len())
+        } else {
+            start
+        };
+        chunk.start_token = start;
+        chunk.end_token = end.max(start);
+    }
+}
 
 /// find byte offset of a substring within the parent string using pointer arithmetic
 pub(crate) fn byte_offset_of(sub: &str, parent: &str) -> usize {
@@ -103,16 +156,19 @@ pub enum Error {
 }
 
 impl std::fmt::Display for Error {
-    #[allow(unused_variables)]
+    #[cfg(feature = "semantic")]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match *self {
-            #[cfg(feature = "semantic")]
             Error::Embed(ref e) => write!(f, "embedding error: {e}"),
-            // without semantic feature, Error is uninhabited but non_exhaustive
-            // keeps the type valid for future expansion
-            #[cfg(not(feature = "semantic"))]
-            _ => unreachable!("Error is uninhabited without semantic feature"),
         }
+    }
+
+    /// Without the `semantic` feature nothing in this crate can fail, so
+    /// `Error` has no variants. Matching an uninhabited value with no arms is
+    /// how you say that to the compiler — no `unreachable!()` required.
+    #[cfg(not(feature = "semantic"))]
+    fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {}
     }
 }
 
@@ -139,10 +195,6 @@ pub fn chunk(text: &str) -> ChunkBuilder<'_> {
         model_name: None,
         encoding_name: None,
         strategy: Strategy::Recursive,
-        #[cfg(feature = "semantic")]
-        semantic_client: None,
-        #[cfg(feature = "semantic")]
-        semantic_threshold: 0.5,
     }
 }
 
@@ -151,14 +203,19 @@ pub fn chunk(text: &str) -> ChunkBuilder<'_> {
 enum Strategy {
     Recursive,
     Markdown,
-    #[cfg(feature = "semantic")]
-    Semantic,
+    Code,
+    Html,
 }
 
 /// Builder for configuring text chunking.
 ///
-/// Created by [`chunk()`]. Chain methods to configure, then call [`.split()`](ChunkBuilder::split)
-/// (sync) or [`.split_async()`](ChunkBuilder::split_async) (semantic).
+/// Created by [`chunk()`]. Chain methods to configure, then call
+/// [`.split()`](ChunkBuilder::split).
+///
+/// [`.semantic()`](ChunkBuilder::semantic) converts this into a
+/// [`SemanticChunkBuilder`], which offers only `.split_async()` — semantic
+/// splitting makes network calls, so there is no synchronous `.split()` to
+/// call by mistake.
 pub struct ChunkBuilder<'a> {
     text: &'a str,
     max_tokens: usize,
@@ -166,10 +223,6 @@ pub struct ChunkBuilder<'a> {
     model_name: Option<&'a str>,
     encoding_name: Option<&'a str>,
     strategy: Strategy,
-    #[cfg(feature = "semantic")]
-    semantic_client: Option<&'a embedrs::Client>,
-    #[cfg(feature = "semantic")]
-    semantic_threshold: f64,
 }
 
 impl<'a> ChunkBuilder<'a> {
@@ -255,50 +308,80 @@ impl<'a> ChunkBuilder<'a> {
     /// ```rust
     /// let md = "# Title\n\nContent here.\n";
     /// let chunks = chunkedrs::chunk(md).markdown().split();
-    /// assert_eq!(chunks[0].section.as_deref(), Some("# Title"));
+    /// assert_eq!(chunks[0].section(), Some("# Title"));
     /// ```
     pub fn markdown(mut self) -> Self {
         self.strategy = Strategy::Markdown;
         self
     }
 
+    /// Use code-aware splitting.
+    ///
+    /// Boundary-aware, **not** AST-aware: this splits on blank lines, block
+    /// braces at low nesting depth, and dedents, in that order, then falls back
+    /// to the ordinary text ladder. It parses nothing and adds no dependencies,
+    /// so it works on any language — and it will not track a construct across a
+    /// boundary the way a real parser would. If you need AST fidelity, use a
+    /// tree-sitter based splitter.
+    ///
+    /// ```rust
+    /// let src = "fn a() {\n    one();\n}\n\nfn b() {\n    two();\n}\n";
+    /// let chunks = chunkedrs::chunk(src).code().max_tokens(12).split();
+    /// assert!(chunks.len() >= 2);
+    /// ```
+    pub fn code(mut self) -> Self {
+        self.strategy = Strategy::Code;
+        self
+    }
+
+    /// Use HTML-aware splitting.
+    ///
+    /// Boundary-aware, **not** DOM-aware: this splits after block-level closing
+    /// tags (`</p>`, `</div>`, `</section>`, headings, list items, …) by
+    /// scanning bytes. It builds no tree and adds no dependencies. Malformed or
+    /// deeply nested markup degrades to the ordinary text ladder rather than
+    /// failing.
+    ///
+    /// ```rust
+    /// let html = "<h1>Title</h1><p>First para.</p><p>Second para.</p>";
+    /// let chunks = chunkedrs::chunk(html).html().max_tokens(8).split();
+    /// assert!(chunks.len() >= 2);
+    /// ```
+    pub fn html(mut self) -> Self {
+        self.strategy = Strategy::Html;
+        self
+    }
+
     /// Use semantic splitting with an embedding client.
     ///
     /// Splits at meaning boundaries by computing cosine similarity between
-    /// consecutive sentence embeddings. When similarity drops below the threshold,
-    /// a new chunk begins.
+    /// consecutive sentence embeddings. When similarity drops below the
+    /// threshold, a new chunk begins.
+    ///
+    /// Returns a [`SemanticChunkBuilder`], which has no `.split()` — semantic
+    /// splitting makes network calls, so the synchronous method simply does not
+    /// exist on it. This used to be a runtime panic.
     ///
     /// Requires the `semantic` feature and an [`embedrs::Client`].
-    /// Must use [`.split_async()`](ChunkBuilder::split_async) instead of `.split()`.
     ///
     /// ```rust,ignore
     /// let client = embedrs::openai("sk-...");
     /// let chunks = chunkedrs::chunk(text)
     ///     .semantic(&client)
+    ///     .threshold(0.5)
     ///     .split_async()
     ///     .await?;
     /// ```
     #[cfg(feature = "semantic")]
-    pub fn semantic(mut self, client: &'a embedrs::Client) -> Self {
-        self.strategy = Strategy::Semantic;
-        self.semantic_client = Some(client);
-        self
+    pub fn semantic(self, client: &'a embedrs::Client) -> SemanticChunkBuilder<'a> {
+        SemanticChunkBuilder {
+            base: self,
+            client,
+            threshold: 0.5,
+        }
     }
 
-    /// Set the similarity threshold for semantic splitting. Default: 0.5.
-    ///
-    /// Lower values create fewer, larger chunks. Higher values create more, smaller chunks.
-    /// Only effective when using [`.semantic()`](ChunkBuilder::semantic).
-    #[cfg(feature = "semantic")]
-    pub fn threshold(mut self, t: f64) -> Self {
-        self.semantic_threshold = t;
-        self
-    }
-
-    /// Split the text synchronously. Works with recursive and markdown strategies.
-    ///
-    /// Panics if called with the semantic strategy — use
-    /// [`.split_async()`](ChunkBuilder::split_async) instead.
+    /// Split the text.
     ///
     /// ```rust
     /// let chunks = chunkedrs::chunk("hello world").split();
@@ -306,55 +389,23 @@ impl<'a> ChunkBuilder<'a> {
     /// ```
     pub fn split(self) -> Vec<Chunk> {
         let encoder = self.resolve_encoder();
-        match self.strategy {
+        let mut chunks = match self.strategy {
             Strategy::Recursive => recursive::split_recursive(
                 self.text,
                 0,
                 self.max_tokens,
                 self.overlap,
                 encoder,
-                &None,
+                &[],
             ),
             Strategy::Markdown => {
                 markdown::split_markdown(self.text, self.max_tokens, self.overlap, encoder)
             }
-            #[cfg(feature = "semantic")]
-            Strategy::Semantic => {
-                panic!(
-                    "semantic strategy requires async: use .split_async().await instead of .split()"
-                )
-            }
-        }
-    }
-
-    /// Split the text asynchronously. Required for semantic splitting.
-    ///
-    /// ```rust,ignore
-    /// let chunks = chunkedrs::chunk(text)
-    ///     .semantic(&client)
-    ///     .split_async()
-    ///     .await?;
-    /// ```
-    #[cfg(feature = "semantic")]
-    pub async fn split_async(self) -> Result<Vec<Chunk>> {
-        let encoder = self.resolve_encoder();
-        match self.strategy {
-            Strategy::Semantic => {
-                let client = self
-                    .semantic_client
-                    .expect("semantic() must be called before split_async()");
-                semantic::split_semantic(
-                    self.text,
-                    self.max_tokens,
-                    self.overlap,
-                    encoder,
-                    client,
-                    self.semantic_threshold,
-                )
-                .await
-            }
-            _ => Ok(self.split()),
-        }
+            Strategy::Code => code::split_code(self.text, self.max_tokens, self.overlap, encoder),
+            Strategy::Html => html::split_html(self.text, self.max_tokens, self.overlap, encoder),
+        };
+        assign_token_spans(&mut chunks, self.text, encoder);
+        chunks
     }
 
     fn resolve_encoder(&self) -> &'static tiktoken::CoreBpe {
@@ -373,6 +424,78 @@ impl<'a> ChunkBuilder<'a> {
         }
 
         default()
+    }
+}
+
+/// Builder for semantic splitting, produced by
+/// [`ChunkBuilder::semantic`](ChunkBuilder::semantic).
+///
+/// It deliberately offers no `.split()`. Semantic splitting has to embed the
+/// text, which means network calls, so the synchronous entry point does not
+/// exist here rather than existing and panicking.
+#[cfg(feature = "semantic")]
+pub struct SemanticChunkBuilder<'a> {
+    base: ChunkBuilder<'a>,
+    client: &'a embedrs::Client,
+    threshold: f64,
+}
+
+#[cfg(feature = "semantic")]
+impl<'a> SemanticChunkBuilder<'a> {
+    /// Set the similarity threshold. Default: 0.5.
+    ///
+    /// Lower values create fewer, larger chunks; higher values create more,
+    /// smaller ones.
+    pub fn threshold(mut self, t: f64) -> Self {
+        self.threshold = t;
+        self
+    }
+
+    /// Set the maximum number of tokens per chunk. Default: 512.
+    pub fn max_tokens(mut self, n: usize) -> Self {
+        self.base = self.base.max_tokens(n);
+        self
+    }
+
+    /// Set the number of overlapping tokens between consecutive chunks.
+    pub fn overlap(mut self, tokens: usize) -> Self {
+        self.base = self.base.overlap(tokens);
+        self
+    }
+
+    /// Set the model name used to select the tokenizer encoding.
+    pub fn model(mut self, model: &'a str) -> Self {
+        self.base = self.base.model(model);
+        self
+    }
+
+    /// Set the tiktoken encoding name directly.
+    pub fn encoding(mut self, encoding: &'a str) -> Self {
+        self.base = self.base.encoding(encoding);
+        self
+    }
+
+    /// Split the text, embedding it to find meaning boundaries.
+    ///
+    /// ```rust,ignore
+    /// let chunks = chunkedrs::chunk(text)
+    ///     .semantic(&client)
+    ///     .split_async()
+    ///     .await?;
+    /// ```
+    pub async fn split_async(self) -> Result<Vec<Chunk>> {
+        let encoder = self.base.resolve_encoder();
+        let mut chunks = semantic::split_semantic(
+            self.base.text,
+            self.base.max_tokens,
+            self.base.overlap,
+            encoder,
+            self.client,
+            self.threshold,
+        )
+        .await?;
+        assign_token_spans(&mut chunks, self.base.text, encoder);
+        Ok(chunks)
     }
 }
 
@@ -442,7 +565,7 @@ mod tests {
         let md = "# Title\n\nSome content.\n\n## Section\n\nMore content.\n";
         let chunks = chunk(md).markdown().split();
         assert!(chunks.len() >= 2);
-        assert_eq!(chunks[0].section.as_deref(), Some("# Title"));
+        assert_eq!(chunks[0].section(), Some("# Title"));
     }
 
     #[test]

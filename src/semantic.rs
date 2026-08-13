@@ -25,7 +25,7 @@ pub(crate) async fn split_semantic(
 
     let sentences = split_sentences(text);
     if sentences.len() <= 1 {
-        let chunks = split_recursive(text, 0, max_tokens, overlap_tokens, encoder, &None);
+        let chunks = split_recursive(text, 0, max_tokens, overlap_tokens, encoder, &[]);
         return Ok(chunks);
     }
 
@@ -52,7 +52,7 @@ pub(crate) async fn split_semantic(
             max_tokens,
             overlap_tokens,
             encoder,
-            &None,
+            &[],
         );
         all_chunks.extend(sub_chunks);
     }
@@ -79,7 +79,7 @@ struct Sentence<'a> {
 fn split_sentences(text: &str) -> Vec<Sentence<'_>> {
     // tier 0 = paragraph, 1 = line, 2 = sentence
     const SENTENCE_TIER: usize = 2;
-    let seps: Vec<&str> = crate::recursive::SEPARATOR_TIERS[SENTENCE_TIER]
+    let seps: Vec<&str> = crate::recursive::TEXT_TIERS[SENTENCE_TIER]
         .iter()
         .copied()
         // A newline ends a sentence too, and the sentence tier does not carry
