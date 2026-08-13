@@ -113,16 +113,15 @@ well — chunk boundaries and token counts both moved there.
 
 ### Changed — dependencies
 
-- `tiktoken` floor `"3.8"` → `"4"`. Token ids, encoding behaviour and function
-  signatures are unchanged across that major — the bump is entirely about
-  vocabularies becoming features — so no chunk boundary moves because of it.
-  4.0.0 also halves the vocabulary payload by re-encoding it as `TKV1`.
+The floors themselves (`tiktoken` `"4"`, `embedrs` `"0.5"`) arrive in 1.1.0 —
+both lines are on the current majors. What 2.0 changes is *how* tiktoken is
+depended on: `default-features = false` plus the `vocab-*` passthrough above,
+so callers can choose their vocabularies. 1.x keeps the plain `"4"` and
+therefore all of them.
 
-  Note for anyone combining this with `embedrs`: `embedrs` 0.4's optional
-  `cost-tracking` feature still requires `tiktoken` `^3.5`. chunkedrs does not
-  enable it, so the default tree carries one tiktoken — but a project that
-  turns `cost-tracking` on alongside `chunkedrs` 2 will compile two majors of
-  it until `embedrs` moves to 4.
+With chunkedrs and embedrs both on tiktoken 4, a project enabling
+`chunkedrs/semantic` and `embedrs/cost-tracking` together resolves to a single
+tiktoken — verified with a scratch consumer depending on both.
 
 ### Changed — internal
 
