@@ -12,7 +12,7 @@ use tiktoken::CoreBpe;
 /// space after a sentence mark, so a ladder whose every entry ends in an ASCII
 /// space (`". "`, `"! "`, `", "`, `" "`) matches nothing at all in CJK prose —
 /// it fell through every tier to the token-level fallback and cut mid-word.
-pub(crate) const SEPARATOR_TIERS: &[&[&str]] = &[
+pub(crate) const TEXT_TIERS: &[&[&str]] = &[
     // paragraph
     &["\r\n\r\n", "\n\n"],
     // line
@@ -58,7 +58,44 @@ pub(crate) fn split_recursive(
     max_tokens: usize,
     overlap_tokens: usize,
     encoder: &CoreBpe,
-    section: &Option<String>,
+    section_path: &[String],
+) -> Vec<Chunk> {
+    split_with_tiers(
+        text,
+        text_offset,
+        max_tokens,
+        overlap_tokens,
+        encoder,
+        section_path,
+        TEXT_TIERS,
+    )
+}
+
+/// Everything the descent needs that does not change as it recurses.
+///
+/// Bundling these is not cosmetic: the descent passes them through four
+/// functions, and threading them individually is what earned the old
+/// `too_many_arguments` allow.
+#[derive(Clone, Copy)]
+pub(crate) struct Ctx<'a> {
+    pub max_tokens: usize,
+    pub overlap_tokens: usize,
+    pub encoder: &'a CoreBpe,
+    pub section_path: &'a [String],
+    /// Separator tiers, tried outermost first. Each strategy brings its own —
+    /// prose splits on sentence marks, code on block boundaries.
+    pub tiers: &'static [&'static [&'static str]],
+}
+
+/// Split with an explicit separator ladder.
+pub(crate) fn split_with_tiers(
+    text: &str,
+    text_offset: usize,
+    max_tokens: usize,
+    overlap_tokens: usize,
+    encoder: &CoreBpe,
+    section_path: &[String],
+    tiers: &'static [&'static [&'static str]],
 ) -> Vec<Chunk> {
     if text.is_empty() {
         return Vec::new();
@@ -71,71 +108,48 @@ pub(crate) fn split_recursive(
             index: 0,
             start_byte: text_offset,
             end_byte: text_offset + text.len(),
+            // token spans are filled in by a document-level pass in lib.rs,
+            // which is the only place that can see the whole token stream
+            start_token: 0,
+            end_token: 0,
             token_count,
-            section: section.clone(),
+            section_path: section_path.to_vec(),
         }];
     }
 
-    // clamp overlap to guarantee forward progress (must be < max_tokens)
-    let safe_overlap = overlap_tokens.min(max_tokens.saturating_sub(1));
-
-    split_with_separators(
-        text,
-        text_offset,
+    let ctx = Ctx {
         max_tokens,
-        safe_overlap,
+        // clamp overlap to guarantee forward progress (must be < max_tokens)
+        overlap_tokens: overlap_tokens.min(max_tokens.saturating_sub(1)),
         encoder,
-        section,
-        0,
-    )
+        section_path,
+        tiers,
+    };
+
+    descend(text, text_offset, ctx, 0)
 }
 
-fn split_with_separators(
-    text: &str,
-    text_offset: usize,
-    max_tokens: usize,
-    overlap_tokens: usize,
-    encoder: &CoreBpe,
-    section: &Option<String>,
-    sep_index: usize,
-) -> Vec<Chunk> {
+fn descend(text: &str, text_offset: usize, ctx: Ctx<'_>, tier: usize) -> Vec<Chunk> {
     // base case: token-level split
-    if sep_index >= SEPARATOR_TIERS.len() {
+    if tier >= ctx.tiers.len() {
         return split_by_tokens(
             text,
             text_offset,
-            max_tokens,
-            overlap_tokens,
-            encoder,
-            section,
+            ctx.max_tokens,
+            ctx.overlap_tokens,
+            ctx.encoder,
+            ctx.section_path,
         );
     }
 
-    let pieces = split_at_any(text, SEPARATOR_TIERS[sep_index]);
+    let pieces = split_at_any(text, ctx.tiers[tier]);
 
-    // if separator didn't split anything, try next
+    // if this tier didn't split anything, try the next
     if pieces.len() <= 1 {
-        return split_with_separators(
-            text,
-            text_offset,
-            max_tokens,
-            overlap_tokens,
-            encoder,
-            section,
-            sep_index + 1,
-        );
+        return descend(text, text_offset, ctx, tier + 1);
     }
 
-    merge_pieces(
-        &pieces,
-        text,
-        text_offset,
-        max_tokens,
-        overlap_tokens,
-        encoder,
-        section,
-        sep_index,
-    )
+    merge_pieces(&pieces, text, text_offset, ctx, tier + 1)
 }
 
 /// Split text at any separator in `seps`, keeping the separator attached to the
@@ -187,18 +201,26 @@ fn absorb_trailing(text: &str, from: usize) -> usize {
     end
 }
 
-/// merge small pieces into chunks that fit within max_tokens
-#[allow(clippy::too_many_arguments)]
-fn merge_pieces(
+/// Merge pieces into chunks that fit within `max_tokens`.
+///
+/// `next_tier` is where an oversized piece goes to be split further. Strategies
+/// that produce their own pieces (HTML block tags, say) pass `0` to hand the
+/// remainder to the whole ladder.
+pub(crate) fn merge_pieces(
     pieces: &[&str],
     original_text: &str,
     text_offset: usize,
-    max_tokens: usize,
-    overlap_tokens: usize,
-    encoder: &CoreBpe,
-    section: &Option<String>,
-    sep_index: usize,
+    ctx: Ctx<'_>,
+    next_tier: usize,
 ) -> Vec<Chunk> {
+    let Ctx {
+        max_tokens,
+        overlap_tokens,
+        encoder,
+        section_path,
+        ..
+    } = ctx;
+
     let mut chunks = Vec::new();
     let mut current = String::new();
     let mut current_tokens = 0usize;
@@ -217,21 +239,13 @@ fn merge_pieces(
                     &current,
                     text_offset + current_start,
                     encoder,
-                    section,
+                    section_path,
                 ));
                 current.clear();
                 current_tokens = 0;
             }
 
-            let sub_chunks = split_with_separators(
-                piece,
-                text_offset + piece_offset,
-                max_tokens,
-                overlap_tokens,
-                encoder,
-                section,
-                sep_index + 1,
-            );
+            let sub_chunks = descend(piece, text_offset + piece_offset, ctx, next_tier);
             chunks.extend(sub_chunks);
             piece_end = piece_offset + piece.len();
             current_start = piece_end;
@@ -244,7 +258,7 @@ fn merge_pieces(
                 &current,
                 text_offset + current_start,
                 encoder,
-                section,
+                section_path,
             ));
 
             // handle overlap: take tokens from end of current chunk
@@ -277,7 +291,7 @@ fn merge_pieces(
             &current,
             text_offset + current_start,
             encoder,
-            section,
+            section_path,
         ));
     }
 
@@ -297,7 +311,7 @@ fn merge_pieces(
                     max_tokens,
                     0, // no overlap in post-verify to guarantee termination
                     encoder,
-                    section,
+                    section_path,
                 );
                 verified.extend(sub);
             } else {
@@ -324,7 +338,7 @@ fn split_by_tokens(
     max_tokens: usize,
     overlap_tokens: usize,
     encoder: &CoreBpe,
-    section: &Option<String>,
+    section_path: &[String],
 ) -> Vec<Chunk> {
     let tokens = encoder.encode(text);
     let mut chunks = Vec::new();
@@ -367,8 +381,10 @@ fn split_by_tokens(
                 index: chunks.len(),
                 start_byte: text_offset + byte_start,
                 end_byte: text_offset + byte_end,
+                start_token: 0,
+                end_token: 0,
                 token_count,
-                section: section.clone(),
+                section_path: section_path.to_vec(),
             });
         }
 
@@ -397,15 +413,17 @@ fn make_chunk(
     content: &str,
     start_byte: usize,
     encoder: &CoreBpe,
-    section: &Option<String>,
+    section_path: &[String],
 ) -> Chunk {
     Chunk {
         content: content.to_string(),
         index: 0, // will be assigned later
         start_byte,
         end_byte: start_byte + content.len(),
+        start_token: 0,
+        end_token: 0,
         token_count: encoder.count(content),
-        section: section.clone(),
+        section_path: section_path.to_vec(),
     }
 }
 
@@ -503,7 +521,7 @@ mod tests {
     #[test]
     fn short_text_returns_single_chunk() {
         let enc = encoder();
-        let chunks = split_recursive("hello world", 0, 100, 0, enc, &None);
+        let chunks = split_recursive("hello world", 0, 100, 0, enc, &[]);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].content, "hello world");
         assert_eq!(chunks[0].index, 0);
@@ -514,7 +532,7 @@ mod tests {
     #[test]
     fn empty_text_returns_empty() {
         let enc = encoder();
-        let chunks = split_recursive("", 0, 100, 0, enc, &None);
+        let chunks = split_recursive("", 0, 100, 0, enc, &[]);
         assert!(chunks.is_empty());
     }
 
@@ -523,7 +541,7 @@ mod tests {
         let enc = encoder();
         let text =
             "First paragraph with some content here.\n\nSecond paragraph with different content.";
-        let chunks = split_recursive(text, 0, 10, 0, enc, &None);
+        let chunks = split_recursive(text, 0, 10, 0, enc, &[]);
         assert!(chunks.len() >= 2);
         assert_eq!(chunks[0].start_byte, 0);
         for (i, chunk) in chunks.iter().enumerate() {
@@ -536,7 +554,7 @@ mod tests {
         let enc = encoder();
         let text = "The quick brown fox jumps over the lazy dog. ".repeat(50);
         let max_tokens = 20;
-        let chunks = split_recursive(&text, 0, max_tokens, 0, enc, &None);
+        let chunks = split_recursive(&text, 0, max_tokens, 0, enc, &[]);
         for chunk in &chunks {
             assert!(
                 chunk.token_count <= max_tokens,
@@ -552,7 +570,7 @@ mod tests {
     fn overlap_creates_shared_content() {
         let enc = encoder();
         let text = "Alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa.";
-        let chunks = split_recursive(text, 0, 8, 2, enc, &None);
+        let chunks = split_recursive(text, 0, 8, 2, enc, &[]);
         assert!(chunks.len() >= 2);
         // with overlap, chunk N+1 should start with some text from the end of chunk N
         for i in 0..chunks.len() - 1 {
@@ -575,15 +593,16 @@ mod tests {
     #[test]
     fn section_metadata_preserved() {
         let enc = encoder();
-        let section = Some("## Architecture".to_string());
-        let chunks = split_recursive("hello world", 0, 100, 0, enc, &section);
-        assert_eq!(chunks[0].section.as_deref(), Some("## Architecture"));
+        let path = vec!["# Design".to_string(), "## Architecture".to_string()];
+        let chunks = split_recursive("hello world", 0, 100, 0, enc, &path);
+        assert_eq!(chunks[0].section_path, path);
+        assert_eq!(chunks[0].section(), Some("## Architecture"));
     }
 
     #[test]
     fn text_offset_propagated() {
         let enc = encoder();
-        let chunks = split_recursive("hello", 100, 100, 0, enc, &None);
+        let chunks = split_recursive("hello", 100, 100, 0, enc, &[]);
         assert_eq!(chunks[0].start_byte, 100);
         assert_eq!(chunks[0].end_byte, 105);
     }
@@ -624,7 +643,7 @@ mod tests {
     fn chinese_text_split() {
         let enc = encoder();
         let text = "这是第一段内容，包含一些中文文本。\n\n这是第二段内容，也包含中文。\n\n第三段。";
-        let chunks = split_recursive(text, 0, 15, 0, enc, &None);
+        let chunks = split_recursive(text, 0, 15, 0, enc, &[]);
         assert!(chunks.len() >= 2);
         for chunk in &chunks {
             assert!(chunk.token_count <= 15);
@@ -635,7 +654,7 @@ mod tests {
     fn japanese_text_split() {
         let enc = encoder();
         let text = "最初の段落です。日本語のテキストを含みます。\n\n二番目の段落です。異なる内容があります。";
-        let chunks = split_recursive(text, 0, 15, 0, enc, &None);
+        let chunks = split_recursive(text, 0, 15, 0, enc, &[]);
         assert!(!chunks.is_empty());
         for chunk in &chunks {
             assert!(chunk.token_count <= 15);
@@ -646,7 +665,7 @@ mod tests {
     fn sentence_level_split() {
         let enc = encoder();
         let text = "First sentence here. Second sentence here. Third sentence here. Fourth sentence here. Fifth sentence here.";
-        let chunks = split_recursive(text, 0, 8, 0, enc, &None);
+        let chunks = split_recursive(text, 0, 8, 0, enc, &[]);
         assert!(chunks.len() >= 2);
         for chunk in &chunks {
             assert!(chunk.token_count <= 8);
@@ -657,7 +676,7 @@ mod tests {
     fn single_long_word_split_by_tokens() {
         let enc = encoder();
         let text = "a".repeat(500);
-        let chunks = split_recursive(&text, 0, 10, 0, enc, &None);
+        let chunks = split_recursive(&text, 0, 10, 0, enc, &[]);
         assert!(chunks.len() >= 2);
         for chunk in &chunks {
             assert!(chunk.token_count <= 10);
@@ -671,7 +690,7 @@ mod tests {
         let enc = encoder();
         let text = "hello world foo bar baz qux quux corge";
         // overlap == max_tokens should be clamped, not infinite loop
-        let chunks = split_recursive(text, 0, 3, 3, enc, &None);
+        let chunks = split_recursive(text, 0, 3, 3, enc, &[]);
         assert!(!chunks.is_empty());
         for c in &chunks {
             assert!(c.token_count <= 3);
@@ -682,7 +701,7 @@ mod tests {
     fn overlap_exceeds_max_tokens_does_not_hang() {
         let enc = encoder();
         let text = "hello world foo bar baz qux quux corge";
-        let chunks = split_recursive(text, 0, 3, 100, enc, &None);
+        let chunks = split_recursive(text, 0, 3, 100, enc, &[]);
         assert!(!chunks.is_empty());
         for c in &chunks {
             assert!(c.token_count <= 3);
@@ -693,7 +712,7 @@ mod tests {
     fn byte_offsets_match_content_no_overlap() {
         let enc = encoder();
         let text = "First paragraph here.\n\nSecond paragraph here.\n\nThird paragraph here.";
-        let chunks = split_recursive(text, 0, 8, 0, enc, &None);
+        let chunks = split_recursive(text, 0, 8, 0, enc, &[]);
         assert!(chunks.len() >= 2);
         for chunk in &chunks {
             let extracted = &text[chunk.start_byte..chunk.end_byte];
@@ -709,7 +728,7 @@ mod tests {
     fn byte_offsets_match_content_with_overlap() {
         let enc = encoder();
         let text = "Alpha bravo charlie. Delta echo foxtrot. Golf hotel india.";
-        let chunks = split_recursive(text, 0, 6, 2, enc, &None);
+        let chunks = split_recursive(text, 0, 6, 2, enc, &[]);
         assert!(chunks.len() >= 2);
         for chunk in &chunks {
             let extracted = &text[chunk.start_byte..chunk.end_byte];
@@ -726,7 +745,7 @@ mod tests {
         let enc = encoder();
         // long string with no separators — forces token-level split
         let text = "a".repeat(100);
-        let chunks = split_recursive(&text, 0, 5, 0, enc, &None);
+        let chunks = split_recursive(&text, 0, 5, 0, enc, &[]);
         assert!(chunks.len() >= 2);
         for i in 1..chunks.len() {
             assert!(
@@ -744,7 +763,7 @@ mod tests {
     fn token_split_with_overlap() {
         let enc = encoder();
         let text = "a".repeat(100);
-        let chunks = split_recursive(&text, 0, 10, 3, enc, &None);
+        let chunks = split_recursive(&text, 0, 10, 3, enc, &[]);
         assert!(chunks.len() >= 2);
         for c in &chunks {
             assert!(c.token_count <= 10);
@@ -770,7 +789,7 @@ mod tests {
             "Hello! World? Yes. No! Maybe? ".repeat(50),
         ];
         for text in &texts {
-            let chunks = split_recursive(text, 0, 7, 0, enc, &None);
+            let chunks = split_recursive(text, 0, 7, 0, enc, &[]);
             for chunk in &chunks {
                 let actual = enc.count(&chunk.content);
                 assert!(

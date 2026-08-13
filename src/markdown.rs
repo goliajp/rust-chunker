@@ -22,15 +22,14 @@ pub(crate) fn split_markdown(
     let sections = extract_sections(text);
     let mut all_chunks = Vec::new();
 
-    for (header, content, byte_offset) in &sections {
-        let section = header.clone();
+    for section in &sections {
         let sub_chunks = split_recursive(
-            content,
-            *byte_offset,
+            &section.content,
+            section.byte_offset,
             max_tokens,
             overlap_tokens,
             encoder,
-            &section,
+            &section.path,
         );
         all_chunks.extend(sub_chunks);
     }
@@ -56,13 +55,25 @@ struct Fence {
 /// four or more makes it an indented code block instead.
 const MAX_BLOCK_INDENT: usize = 3;
 
-/// extract markdown sections: (header, content, byte_offset)
-fn extract_sections(text: &str) -> Vec<(Option<String>, String, usize)> {
+/// A run of body text together with the header ancestry it sits under.
+struct Section {
+    /// Headers from outermost to innermost, e.g.
+    /// `["# Guide", "## Installation"]`. Empty before the first header.
+    path: Vec<String>,
+    content: String,
+    byte_offset: usize,
+}
+
+/// extract markdown sections with their header ancestry
+fn extract_sections(text: &str) -> Vec<Section> {
     let lines: Vec<&str> = text.split_inclusive('\n').collect();
     let front_matter_end = front_matter_end(&lines);
 
-    let mut sections: Vec<(Option<String>, String, usize)> = Vec::new();
-    let mut current_header: Option<String> = None;
+    let mut sections: Vec<Section> = Vec::new();
+    // (level, header) from outermost inwards — a header of level L pops every
+    // entry at level >= L, so `## Usage` after `### From source` correctly
+    // drops back to sitting under `# Guide`.
+    let mut stack: Vec<(usize, String)> = Vec::new();
     let mut current_content = String::new();
     let mut current_offset = 0usize;
     let mut fence: Option<Fence> = None;
@@ -101,35 +112,34 @@ fn extract_sections(text: &str) -> Vec<(Option<String>, String, usize)> {
         // ordinary `key: value` line and would otherwise read as a setext rule.
         let in_front_matter = i < front_matter_end;
 
-        let mut header: Option<String> = None;
+        let mut header: Option<(usize, String)> = None;
         let mut header_end = line.len();
 
         if !in_front_matter && indented_enough {
-            if is_header(body) {
-                header = Some(body.trim_end().to_string());
+            if let Some(level) = atx_level(body) {
+                header = Some((level, body.trim_end().to_string()));
             } else if !body.trim().is_empty()
-                && lines
-                    .get(i + 1)
-                    .is_some_and(|next| is_setext_underline(next))
+                && let Some(level) = lines.get(i + 1).and_then(|next| setext_level(next))
             {
-                // `Title` followed by `====` or `----`
-                header = Some(body.trim_end().to_string());
+                // `Title` followed by `====` (level 1) or `----` (level 2)
+                header = Some((level, body.trim_end().to_string()));
                 header_end = line.len() + lines[i + 1].len();
                 skip_next = true;
             }
         }
 
         match header {
-            Some(h) => {
+            Some((level, text_of_header)) => {
                 // flush previous section
                 if !current_content.is_empty() {
-                    sections.push((
-                        current_header.clone(),
-                        std::mem::take(&mut current_content),
-                        current_offset,
-                    ));
+                    sections.push(Section {
+                        path: stack.iter().map(|(_, h)| h.clone()).collect(),
+                        content: std::mem::take(&mut current_content),
+                        byte_offset: current_offset,
+                    });
                 }
-                current_header = Some(h);
+                stack.retain(|(l, _)| *l < level);
+                stack.push((level, text_of_header));
                 current_offset = byte_offset_of(line, text) + header_end;
             }
             None => push_content(line, text, &mut current_content, &mut current_offset),
@@ -138,7 +148,11 @@ fn extract_sections(text: &str) -> Vec<(Option<String>, String, usize)> {
 
     // flush last section
     if !current_content.is_empty() {
-        sections.push((current_header, current_content, current_offset));
+        sections.push(Section {
+            path: stack.iter().map(|(_, h)| h.clone()).collect(),
+            content: current_content,
+            byte_offset: current_offset,
+        });
     }
 
     sections
@@ -151,20 +165,29 @@ fn push_content(line: &str, text: &str, content: &mut String, offset: &mut usize
     content.push_str(line);
 }
 
-/// An ATX header: one to six `#` followed by a space.
-fn is_header(line: &str) -> bool {
+/// Nesting level of an ATX header: one to six `#` followed by a space.
+fn atx_level(line: &str) -> Option<usize> {
     let hashes = line.bytes().take_while(|&b| b == b'#').count();
-    (1..=6).contains(&hashes) && line.as_bytes().get(hashes) == Some(&b' ')
+    ((1..=6).contains(&hashes) && line.as_bytes().get(hashes) == Some(&b' ')).then_some(hashes)
 }
 
-/// A setext underline: a run of only `=` or only `-`.
-fn is_setext_underline(line: &str) -> bool {
+/// Nesting level of a setext underline: `=` is level 1, `-` is level 2.
+fn setext_level(line: &str) -> Option<usize> {
     let body = line.trim_start();
     if line.len() - body.len() > MAX_BLOCK_INDENT {
-        return false;
+        return None;
     }
     let body = body.trim_end();
-    !body.is_empty() && (body.bytes().all(|b| b == b'=') || body.bytes().all(|b| b == b'-'))
+    if body.is_empty() {
+        return None;
+    }
+    if body.bytes().all(|b| b == b'=') {
+        Some(1)
+    } else if body.bytes().all(|b| b == b'-') {
+        Some(2)
+    } else {
+        None
+    }
 }
 
 /// Opening fence: a run of three or more backticks or tildes.
@@ -219,18 +242,18 @@ mod tests {
 
     #[test]
     fn is_header_valid() {
-        assert!(is_header("# Title"));
-        assert!(is_header("## Subtitle"));
-        assert!(is_header("### H3"));
-        assert!(is_header("###### H6"));
+        assert!(atx_level("# Title").is_some());
+        assert!(atx_level("## Subtitle").is_some());
+        assert!(atx_level("### H3").is_some());
+        assert!(atx_level("###### H6").is_some());
     }
 
     #[test]
     fn is_header_invalid() {
-        assert!(!is_header("#NoSpace"));
-        assert!(!is_header("####### Too many"));
-        assert!(!is_header("Not a header"));
-        assert!(!is_header(""));
+        assert!(atx_level("#NoSpace").is_none());
+        assert!(atx_level("####### Too many").is_none());
+        assert!(atx_level("Not a header").is_none());
+        assert!(atx_level("").is_none());
     }
 
     #[test]
@@ -265,16 +288,27 @@ mod tests {
 
     #[test]
     fn is_setext_underline_variants() {
-        assert!(is_setext_underline("===\n"));
-        assert!(is_setext_underline("---\n"));
-        assert!(is_setext_underline("=\n"));
-        assert!(!is_setext_underline("\n"));
-        assert!(!is_setext_underline("=-=\n"), "must be a uniform run");
-        assert!(!is_setext_underline("|---|---|\n"), "table separator");
+        assert!(setext_level("===\n").is_some());
+        assert!(setext_level("---\n").is_some());
+        assert!(setext_level("=\n").is_some());
+        assert!(setext_level("\n").is_none());
+        assert!(setext_level("=-=\n").is_none(), "must be a uniform run");
+        assert!(setext_level("|---|---|\n").is_none(), "table separator");
         assert!(
-            !is_setext_underline("    ---\n"),
+            setext_level("    ---\n").is_none(),
             "four spaces makes it an indented code block"
         );
+        assert_eq!(setext_level("===\n"), Some(1), "`=` is an h1 underline");
+        assert_eq!(setext_level("---\n"), Some(2), "`-` is an h2 underline");
+    }
+
+    #[test]
+    fn atx_level_counts_hashes() {
+        assert_eq!(atx_level("# a"), Some(1));
+        assert_eq!(atx_level("### a"), Some(3));
+        assert_eq!(atx_level("###### a"), Some(6));
+        assert_eq!(atx_level("####### a"), None, "seven is too many");
+        assert_eq!(atx_level("#a"), None, "a space is required");
     }
 
     #[test]
@@ -303,8 +337,11 @@ mod tests {
         let text = "# Title\ntext\n```\n# fake\n```\nmore\n";
         let sections = extract_sections(text);
         assert_eq!(sections.len(), 1);
-        assert_eq!(sections[0].0.as_deref(), Some("# Title"));
-        assert!(sections[0].1.contains("# fake"), "content is preserved");
+        assert_eq!(sections[0].path.last().map(String::as_str), Some("# Title"));
+        assert!(
+            sections[0].content.contains("# fake"),
+            "content is preserved"
+        );
     }
 
     #[test]
@@ -312,8 +349,8 @@ mod tests {
         let text = "Title\n=====\nbody\n";
         let sections = extract_sections(text);
         assert_eq!(sections.len(), 1);
-        assert_eq!(sections[0].0.as_deref(), Some("Title"));
-        assert_eq!(sections[0].1, "body\n");
+        assert_eq!(sections[0].path.last().map(String::as_str), Some("Title"));
+        assert_eq!(sections[0].content, "body\n");
     }
 
     #[test]
@@ -321,10 +358,16 @@ mod tests {
         let text = "# Title\nSome intro.\n## Section A\nContent A.\n## Section B\nContent B.\n";
         let sections = extract_sections(text);
         assert_eq!(sections.len(), 3);
-        assert_eq!(sections[0].0.as_deref(), Some("# Title"));
-        assert!(sections[0].1.contains("Some intro."));
-        assert_eq!(sections[1].0.as_deref(), Some("## Section A"));
-        assert_eq!(sections[2].0.as_deref(), Some("## Section B"));
+        assert_eq!(sections[0].path.last().map(String::as_str), Some("# Title"));
+        assert!(sections[0].content.contains("Some intro."));
+        assert_eq!(
+            sections[1].path.last().map(String::as_str),
+            Some("## Section A")
+        );
+        assert_eq!(
+            sections[2].path.last().map(String::as_str),
+            Some("## Section B")
+        );
     }
 
     #[test]
@@ -332,8 +375,8 @@ mod tests {
         let text = "Just plain text\nwith lines\nand more.";
         let sections = extract_sections(text);
         assert_eq!(sections.len(), 1);
-        assert_eq!(sections[0].0, None);
-        assert_eq!(sections[0].1, text);
+        assert_eq!(sections[0].path.last(), None);
+        assert_eq!(sections[0].content, text);
     }
 
     #[test]
@@ -342,7 +385,7 @@ mod tests {
         let text = "# Introduction\n\nSome introductory text here.\n\n## Details\n\nDetailed content goes here with more words.\n";
         let chunks = split_markdown(text, 100, 0, enc);
         assert!(chunks.len() >= 2);
-        assert_eq!(chunks[0].section.as_deref(), Some("# Introduction"));
+        assert_eq!(chunks[0].section(), Some("# Introduction"));
     }
 
     #[test]
@@ -354,7 +397,7 @@ mod tests {
         assert!(chunks.len() >= 2);
         for chunk in &chunks {
             assert!(chunk.token_count <= 20);
-            assert_eq!(chunk.section.as_deref(), Some("# Big Section"));
+            assert_eq!(chunk.section(), Some("# Big Section"));
         }
     }
 
@@ -374,7 +417,7 @@ mod tests {
         let text = "Just plain text without any headers.";
         let chunks = split_markdown(text, 100, 0, enc);
         assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].section, None);
+        assert_eq!(chunks[0].section(), None);
     }
 
     #[test]
@@ -411,7 +454,7 @@ mod tests {
         assert!(chunks.len() >= 2);
         for chunk in &chunks {
             assert!(chunk.token_count <= 20);
-            assert_eq!(chunk.section.as_deref(), Some("# Section"));
+            assert_eq!(chunk.section(), Some("# Section"));
         }
     }
 
@@ -421,7 +464,7 @@ mod tests {
         let text = "Preamble text.\n\n# First Header\n\nContent.";
         let chunks = split_markdown(text, 100, 0, enc);
         assert!(chunks.len() >= 2);
-        assert_eq!(chunks[0].section, None); // preamble has no header
-        assert_eq!(chunks[1].section.as_deref(), Some("# First Header"));
+        assert_eq!(chunks[0].section(), None); // preamble has no header
+        assert_eq!(chunks[1].section(), Some("# First Header"));
     }
 }
