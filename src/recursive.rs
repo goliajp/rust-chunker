@@ -2,8 +2,48 @@ use crate::Chunk;
 use crate::byte_offset_of;
 use tiktoken::CoreBpe;
 
-/// default separators in priority order: paragraph → line → sentence → word
-const SEPARATORS: &[&str] = &["\n\n", "\n", ". ", "! ", "? ", "; ", ", ", " "];
+/// Separator tiers in priority order: paragraph → line → sentence → clause → word.
+///
+/// Within a tier every separator is a candidate and the *earliest* match wins,
+/// so a document mixing scripts splits on whichever mark comes first instead of
+/// letting one script's punctuation starve the other's.
+///
+/// The CJK marks matter more than they look. Chinese and Japanese do not put a
+/// space after a sentence mark, so a ladder whose every entry ends in an ASCII
+/// space (`". "`, `"! "`, `", "`, `" "`) matches nothing at all in CJK prose —
+/// it fell through every tier to the token-level fallback and cut mid-word.
+pub(crate) const SEPARATOR_TIERS: &[&[&str]] = &[
+    // paragraph
+    &["\r\n\r\n", "\n\n"],
+    // line
+    &["\r\n", "\n"],
+    // sentence-final
+    &[
+        ". ", "! ", "? ", // ASCII, space-delimited
+        "。", "！", "？", "．", "｡", // CJK full/half-width terminals
+        "…", "‥", // ellipses
+    ],
+    // clause
+    &[
+        "; ", ", ", ":", // ASCII
+        "；", "，", "、", "：", "･", // CJK
+    ],
+    // word
+    &[" ", "\t", "\u{3000}"],
+];
+
+/// Marks that close something the previous sentence opened. When a separator
+/// match is followed by a run of these, they belong to the piece that just
+/// ended — otherwise a chunk begins with an orphaned `」` or `)`.
+///
+/// Horizontal whitespace is absorbed for the same reason: a chunk should not
+/// open with the space that trailed the previous sentence.
+const TRAILING_ABSORB: &[char] = &[
+    '」', '』', '）', '》', '〉', '】', '｝', '〕', '｣', '〞', '＞', // CJK closers
+    '”', '’', '"', '\'', ')', ']', '}', '>', // ASCII / typographic closers
+    '！', '？', '。', '．', // repeated terminals: "？！", "。。。"
+    ' ', '\t', '\u{3000}', // trailing horizontal space
+];
 
 /// split text recursively at semantic boundaries, respecting token limits.
 ///
@@ -60,7 +100,7 @@ fn split_with_separators(
     sep_index: usize,
 ) -> Vec<Chunk> {
     // base case: token-level split
-    if sep_index >= SEPARATORS.len() {
+    if sep_index >= SEPARATOR_TIERS.len() {
         return split_by_tokens(
             text,
             text_offset,
@@ -71,8 +111,7 @@ fn split_with_separators(
         );
     }
 
-    let sep = SEPARATORS[sep_index];
-    let pieces = split_keeping_separator(text, sep);
+    let pieces = split_at_any(text, SEPARATOR_TIERS[sep_index]);
 
     // if separator didn't split anything, try next
     if pieces.len() <= 1 {
@@ -99,28 +138,53 @@ fn split_with_separators(
     )
 }
 
-/// split text by separator, keeping the separator attached to the piece before it
-fn split_keeping_separator<'a>(text: &'a str, sep: &str) -> Vec<&'a str> {
+/// Split text at any separator in `seps`, keeping the separator attached to the
+/// piece before it.
+///
+/// The earliest match wins; ties go to the longest separator so `"\r\n"` is not
+/// shadowed by `"\n"`. Any run of [`TRAILING_ABSORB`] following the match is
+/// pulled back into the same piece.
+pub(crate) fn split_at_any<'a>(text: &'a str, seps: &[&str]) -> Vec<&'a str> {
     let mut pieces = Vec::new();
     let mut start = 0;
+    let mut search = 0;
 
-    let mut search_start = 0;
-    while let Some(pos) = text[search_start..].find(sep) {
-        let abs_pos = search_start + pos;
-        let end = abs_pos + sep.len();
+    while search < text.len() {
+        let hit = seps
+            .iter()
+            .filter_map(|s| text[search..].find(s).map(|p| (search + p, s.len())))
+            .min_by_key(|&(pos, len)| (pos, std::cmp::Reverse(len)));
+
+        let Some((pos, len)) = hit else { break };
+
+        let end = absorb_trailing(text, pos + len);
         if end > start {
             pieces.push(&text[start..end]);
         }
         start = end;
-        search_start = end;
+        search = end;
     }
 
-    // remaining text after last separator
+    // remaining text after the last separator
     if start < text.len() {
         pieces.push(&text[start..]);
     }
 
     pieces
+}
+
+/// Extend `from` over any run of closing marks and horizontal whitespace, so
+/// they stay with the sentence they belong to rather than opening the next one.
+fn absorb_trailing(text: &str, from: usize) -> usize {
+    let mut end = from;
+    while let Some(c) = text[end..].chars().next() {
+        if TRAILING_ABSORB.contains(&c) {
+            end += c.len_utf8();
+        } else {
+            break;
+        }
+    }
+    end
 }
 
 /// merge small pieces into chunks that fit within max_tokens
@@ -265,12 +329,20 @@ fn split_by_tokens(
     let tokens = encoder.encode(text);
     let mut chunks = Vec::new();
 
-    // compute cumulative byte offsets via prefix sum for O(1) per-chunk lookup
-    let token_byte_lens: Vec<usize> = tokens.iter().map(|&t| encoder.decode(&[t]).len()).collect();
-    let mut prefix_sums = Vec::with_capacity(token_byte_lens.len() + 1);
-    prefix_sums.push(0usize);
-    for &len in &token_byte_lens {
-        prefix_sums.push(prefix_sums.last().unwrap() + len);
+    // Cumulative byte offsets, snapped back to character boundaries.
+    //
+    // A single character can span several tokens (rare CJK and emoji fall back
+    // to byte-level tokens), so a raw token boundary is not necessarily a
+    // character boundary. Snapping *back* rather than forward keeps each slice
+    // a subset of its token window, which is what preserves the `max_tokens`
+    // guarantee; the bytes trimmed here are picked up by the next chunk, so the
+    // split stays lossless.
+    let mut boundaries = Vec::with_capacity(tokens.len() + 1);
+    boundaries.push(0usize);
+    let mut acc = 0usize;
+    for &t in &tokens {
+        acc += encoder.decode(&[t]).len();
+        boundaries.push(floor_char_boundary(text, acc));
     }
 
     let mut start = 0;
@@ -278,25 +350,27 @@ fn split_by_tokens(
     while start < tokens.len() {
         let end = (start + max_tokens).min(tokens.len());
 
-        let byte_start = prefix_sums[start];
-        let byte_end = prefix_sums[end];
+        let byte_start = boundaries[start];
+        let byte_end = boundaries[end];
 
-        // prefer slicing the original text to preserve valid UTF-8 without lossy conversion
-        let content = text
-            .get(byte_start..byte_end)
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| {
-                String::from_utf8_lossy(&encoder.decode(&tokens[start..end])).into_owned()
+        // Skip windows that collapse to nothing — every token in them was a
+        // partial byte sequence of a character the next window will emit whole.
+        if byte_end > byte_start {
+            let content = text[byte_start..byte_end].to_string();
+            // Re-count rather than trusting `end - start`: the boundary snap can
+            // trim bytes, and a stored count that disagrees with the content
+            // would be a lie in the one field users budget against.
+            let token_count = encoder.count(&content);
+
+            chunks.push(Chunk {
+                content,
+                index: chunks.len(),
+                start_byte: text_offset + byte_start,
+                end_byte: text_offset + byte_end,
+                token_count,
+                section: section.clone(),
             });
-
-        chunks.push(Chunk {
-            content,
-            index: chunks.len(),
-            start_byte: text_offset + byte_start,
-            end_byte: text_offset + byte_end,
-            token_count: end - start,
-            section: section.clone(),
-        });
+        }
 
         // guarantee forward progress even with large overlap
         let advance = if overlap_tokens > 0 && end < tokens.len() {
@@ -308,6 +382,15 @@ fn split_by_tokens(
     }
 
     chunks
+}
+
+/// Largest character boundary at or below `i`.
+fn floor_char_boundary(text: &str, i: usize) -> usize {
+    let mut i = i.min(text.len());
+    while i > 0 && !text.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
 }
 
 fn make_chunk(
@@ -351,21 +434,70 @@ mod tests {
     }
 
     #[test]
-    fn split_keeping_separator_basic() {
-        let pieces = split_keeping_separator("aaa\n\nbbb\n\nccc", "\n\n");
+    fn split_at_any_basic() {
+        let pieces = split_at_any("aaa\n\nbbb\n\nccc", &["\n\n"]);
         assert_eq!(pieces, vec!["aaa\n\n", "bbb\n\n", "ccc"]);
     }
 
     #[test]
-    fn split_keeping_separator_no_match() {
-        let pieces = split_keeping_separator("hello world", "\n\n");
+    fn split_at_any_no_match() {
+        let pieces = split_at_any("hello world", &["\n\n"]);
         assert_eq!(pieces, vec!["hello world"]);
     }
 
     #[test]
-    fn split_keeping_separator_trailing() {
-        let pieces = split_keeping_separator("aaa\n\n", "\n\n");
+    fn split_at_any_trailing() {
+        let pieces = split_at_any("aaa\n\n", &["\n\n"]);
         assert_eq!(pieces, vec!["aaa\n\n"]);
+    }
+
+    #[test]
+    fn split_at_any_takes_earliest_match_across_separators() {
+        // '?' comes first even though '.' is listed first — earliest wins, so
+        // one script's punctuation cannot starve another's.
+        let pieces = split_at_any("who? me. you!", &[". ", "! ", "? "]);
+        assert_eq!(pieces, vec!["who? ", "me. ", "you!"]);
+    }
+
+    #[test]
+    fn split_at_any_prefers_longer_separator_on_tie() {
+        let pieces = split_at_any("a\r\nb", &["\n", "\r\n"]);
+        assert_eq!(pieces, vec!["a\r\n", "b"]);
+    }
+
+    #[test]
+    fn split_at_any_splits_cjk_without_spaces() {
+        let pieces = split_at_any("第一句。第二句。第三句。", &["。"]);
+        assert_eq!(pieces, vec!["第一句。", "第二句。", "第三句。"]);
+    }
+
+    #[test]
+    fn split_at_any_absorbs_closing_marks() {
+        let pieces = split_at_any("他说「你好。」然后走了。", &["。"]);
+        assert_eq!(pieces, vec!["他说「你好。」", "然后走了。"]);
+    }
+
+    #[test]
+    fn split_at_any_absorbs_repeated_terminals() {
+        let pieces = split_at_any("真的？！那好吧。", &["。", "？"]);
+        assert_eq!(pieces, vec!["真的？！", "那好吧。"]);
+    }
+
+    #[test]
+    fn absorb_trailing_stops_at_ordinary_text() {
+        assert_eq!(absorb_trailing("」）abc", 0), "」）".len());
+        assert_eq!(absorb_trailing("abc", 0), 0);
+    }
+
+    #[test]
+    fn floor_char_boundary_snaps_back() {
+        let s = "日本語"; // 3 bytes per char
+        assert_eq!(floor_char_boundary(s, 0), 0);
+        assert_eq!(floor_char_boundary(s, 1), 0);
+        assert_eq!(floor_char_boundary(s, 2), 0);
+        assert_eq!(floor_char_boundary(s, 3), 3);
+        assert_eq!(floor_char_boundary(s, 4), 3);
+        assert_eq!(floor_char_boundary(s, 99), s.len());
     }
 
     #[test]
