@@ -19,7 +19,7 @@ RAG パイプライン向けのトークン精度テキストチャンキング 
 - **豊富なメタデータ** — バイトオフセット、トークンオフセット、トークン数、見出しの祖先チェーン
 - **オーバーラップ** — 設定可能なトークンオーバーラップ
 - **任意のトークナイザー** — モデル名から自動検出、または 17 種のエンコーディングを直接指定
-- **tiktoken 4 基盤** — 10 プロバイダーを網羅する最速の純 Rust BPE トークナイザー
+- **tiktoken 4 基盤** — 11 プロバイダーを網羅する最速の純 Rust BPE トークナイザー
 
 ## なぜ chunkedrs？
 
@@ -166,7 +166,7 @@ chunkedrs = { version = "1.1", features = ["semantic"] }
 ```
 
 ```rust,ignore
-let client = embedrs::openai("sk-...");
+let client = embedrs::Client::openai("sk-...");
 let chunks = chunkedrs::chunk("長いテキスト...")
     .semantic(&client)
     .threshold(0.5)

@@ -27,6 +27,19 @@ compile error, and `.split_async()` is the method you want.
 If you are coming from 1.0.x rather than 1.1.0, read the 1.1.0 note below as
 well — chunk boundaries and token counts both moved there.
 
+## [2.1.1] - 2026-08-13
+
+Documentation only. No code changes.
+
+### Fixed
+
+- **Every semantic-splitting example called a constructor that does not
+  exist.** `embedrs::openai("sk-...")` is not an item in embedrs — the
+  constructor is `embedrs::Client::openai(...)`. Five occurrences: the module
+  docs, the `semantic()` doc, and all three READMEs. The blocks are marked
+  `rust,ignore`, so no doctest ever compiled them.
+- "covering 10 providers" is now 11, after tiktoken 4.1.1 added Voyage.
+
 ## [2.1.0] - 2026-08-13
 
 ### Changed

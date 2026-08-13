@@ -140,7 +140,7 @@
 //! With the `semantic` feature enabled, split at meaning boundaries using embeddings:
 //!
 //! ```rust,ignore
-//! let client = embedrs::openai("sk-...");
+//! let client = embedrs::Client::openai("sk-...");
 //! let chunks = chunkedrs::chunk("your long text here...")
 //!     .semantic(&client)
 //!     .split_async()
@@ -462,7 +462,7 @@ impl<'a> ChunkBuilder<'a> {
     /// Requires the `semantic` feature and an [`embedrs::Client`].
     ///
     /// ```rust,ignore
-    /// let client = embedrs::openai("sk-...");
+    /// let client = embedrs::Client::openai("sk-...");
     /// let chunks = chunkedrs::chunk(text)
     ///     .semantic(&client)
     ///     .threshold(0.5)
