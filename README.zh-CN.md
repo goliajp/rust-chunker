@@ -19,7 +19,7 @@
 - **丰富元数据** — 字节偏移、token 偏移、token 计数、标题祖先链
 - **重叠支持** — 可配置的 token 级重叠
 - **任意分词器** — 从模型名称自动检测，或直接指定 17 种编码之一
-- **基于 tiktoken 4** — 最快的纯 Rust BPE 分词器，覆盖 10 家厂商
+- **基于 tiktoken 4** — 最快的纯 Rust BPE 分词器，覆盖 11 家厂商
 
 ## 为什么选择 chunkedrs？
 
@@ -168,7 +168,7 @@ chunkedrs = { version = "1.1", features = ["semantic"] }
 ```
 
 ```rust,ignore
-let client = embedrs::openai("sk-...");
+let client = embedrs::Client::openai("sk-...");
 let chunks = chunkedrs::chunk("你的长文本...")
     .semantic(&client)
     .threshold(0.5)

@@ -19,7 +19,7 @@ Token-accurate text chunking for RAG pipelines — recursive, markdown-aware, an
 - **Rich metadata** — byte offsets, token offsets, token counts, header ancestry
 - **Overlap** — configurable token overlap between chunks
 - **Any tokenizer** — auto-detect from model name or specify one of 17 encodings directly
-- **Built on tiktoken 4** — the fastest pure-Rust BPE tokenizer, covering 10 providers
+- **Built on tiktoken 4** — the fastest pure-Rust BPE tokenizer, covering 11 providers
 
 ## Why chunkedrs?
 
@@ -170,7 +170,7 @@ chunkedrs = { version = "2", features = ["semantic"] }
 ```
 
 ```rust,ignore
-let client = embedrs::openai("sk-...");
+let client = embedrs::Client::openai("sk-...");
 let chunks = chunkedrs::chunk("your long text here...")
     .semantic(&client)
     .threshold(0.5)
