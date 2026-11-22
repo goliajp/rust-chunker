@@ -19,7 +19,7 @@ Token-accurate text chunking for RAG pipelines — recursive, markdown-aware, an
 - **Rich metadata** — byte offsets, token offsets, token counts, header ancestry
 - **Overlap** — configurable token overlap between chunks
 - **Any tokenizer** — auto-detect from model name or specify one of 17 encodings directly
-- **Built on tiktoken 4** — the fastest pure-Rust BPE tokenizer, covering 11 providers
+- **Built on tiktoken 5** — the fastest pure-Rust BPE tokenizer, covering 11 providers
 
 ## Why chunkedrs?
 

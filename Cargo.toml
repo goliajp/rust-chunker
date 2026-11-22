@@ -13,32 +13,33 @@ categories = ["text-processing"]
 readme = "README.md"
 
 [dependencies]
-# 4 is a floor, not a preference. 3.6.0 fixed a pre-tokenizer bug that split
+# Nothing below 4 works here. 3.6.0 fixed a pre-tokenizer bug that split
 # canonical newline runs, and `"\n\n"` is this crate's top-priority separator —
 # every paragraph break in every document was overcounted by one token below it.
 # 3.8.0 fixed the o200k punctuation rule's missing `/` tail. 4.0.0 moved the
 # vocabularies behind features, which is what the `vocab-*` passthrough below
 # exists to forward. See tests/tokenizer_contract.rs, which pins the first two.
-# 4.1.1 is not needed by anything here — it is the floor the rest of the family
-# is on, and a shared floor keeps a `semantic` build from resolving two 4.x.
+# 5.x is not needed by any API used here; it brings the 2026-11 model-to-encoding
+# table (Llama 4, Qwen 3.5, Mistral Large 4 now resolve to their own
+# vocabularies) and 5.0.1's fix for the stack overflow on small-stack threads.
 #
 # `vocab-o200k_base` is not optional here: it is the encoder every unrecognised
 # model name falls back to, so `resolve_encoder` can never fail to find one.
 # Everything beyond it is the caller's choice.
-tiktoken = { version = "4.1.1", default-features = false, features = [
+tiktoken = { version = "5.1.1", default-features = false, features = [
     "vocab-o200k_base",
 ] }
-# 0.6 is a floor for the same reason: embedrs 0.6 is the release that moved to
-# tiktoken 4.1.1, so anything older would pull a second 4.x into a build that
-# enables `semantic` alongside embedrs `cost-tracking`. 0.6 also changes the
+# embedrs 0.6 depends on tiktoken 4, so a build that enables `semantic` alongside
+# embedrs `cost-tracking` resolves tiktoken 4 and 5 side by side until an embedrs
+# release moves to 5; `semantic` alone does not. 0.6 also changes the
 # Voyage default to voyage-4-large, which is a `semantic` caller's concern only
 # if it embeds with Voyage and compares against a previously built index.
 embedrs = { version = "0.6", optional = true }
 
 [features]
-# Vocabularies are opt-out, mirroring tiktoken 4. The default is every one of
+# Vocabularies are opt-out, mirroring tiktoken. The default is every one of
 # them, which is what a 1.x build shipped; `default-features = false` keeps
-# ~5 MB of vocabulary data you may not need out of your binary, leaving
+# ~8 MB of vocabulary data you may not need out of your binary, leaving
 # o200k_base (GPT-4o / GPT-5 / o-series), which is also the fallback encoder.
 #
 #   chunkedrs = { version = "2", default-features = false }
