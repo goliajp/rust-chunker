@@ -8,7 +8,7 @@
 //! cut, and the window shrinks in the rare case that count is over budget.
 
 use crate::Chunk;
-use crate::recursive::absorb_trailing;
+use crate::scan::Scan;
 use tiktoken::CoreBpe;
 
 /// The document, its encoder, and where each of its tokens starts.
@@ -102,108 +102,6 @@ pub(crate) fn tiers(seps: &'static [&'static [&'static str]]) -> Vec<Tier> {
     seps.iter().map(|s| Tier::Seps(s)).collect()
 }
 
-/// Cut positions of every tier whose separators all contain a newline, found
-/// up front with one newline search; the other tiers are searched lazily in
-/// the window of the chunk being planned.
-struct Cuts {
-    eager: Vec<Option<Vec<usize>>>,
-}
-
-impl Cuts {
-    fn new(text: &str, lo: usize, hi: usize, tiers: &[Tier]) -> Self {
-        let eager = tiers
-            .iter()
-            .map(|t| match t {
-                Tier::Cuts(c) => Some(c.iter().copied().filter(|&c| c > lo && c < hi).collect()),
-                Tier::Seps(seps) if seps.iter().all(|s| s.contains('\n')) => {
-                    Some(newline_cuts(&text[lo..hi], seps, lo))
-                }
-                Tier::Seps(_) => None,
-            })
-            .collect();
-        Cuts { eager }
-    }
-}
-
-/// Offset of a separator's first newline; at most 1 for every tier in use.
-fn newline_offset(sep: &str) -> usize {
-    sep.find('\n').unwrap_or(0)
-}
-
-/// Piece ends of `split_at_any(text, seps)` without testing every byte: every
-/// match contains a newline, so only the bytes around each newline are tried.
-fn newline_cuts(text: &str, seps: &[&str], base: usize) -> Vec<usize> {
-    let bytes = text.as_bytes();
-    let mut cuts = Vec::new();
-    let mut resume = 0usize;
-    let mut from = 0usize;
-    while let Some(p) = text[from..].find('\n').map(|p| p + from) {
-        from = p + 1;
-        // earliest start, then longest separator
-        let mut hit: Option<(usize, usize)> = None;
-        for sep in seps {
-            let q = newline_offset(sep);
-            let Some(c) = p.checked_sub(q) else { continue };
-            if c < resume || !bytes[c..].starts_with(sep.as_bytes()) {
-                continue;
-            }
-            let better = match hit {
-                None => true,
-                Some((hc, hl)) => c < hc || (c == hc && sep.len() > hl),
-            };
-            if better {
-                hit = Some((c, sep.len()));
-            }
-        }
-        if let Some((c, len)) = hit {
-            let end = absorb_trailing(text, c + len);
-            if end < text.len() {
-                cuts.push(base + end);
-            }
-            resume = end;
-            from = from.max(end);
-        }
-    }
-    cuts
-}
-
-/// The last piece end of `split_at_any(&text[from..], seps)` that lies in
-/// `(floor, lim]`.
-fn last_cut(text: &str, from: usize, floor: usize, lim: usize, seps: &[&str]) -> Option<usize> {
-    let bytes = text.as_bytes();
-    let mut lead = [false; 256];
-    for sep in seps {
-        lead[sep.as_bytes()[0] as usize] = true;
-    }
-    let mut best = None;
-    let mut i = from;
-    while i < lim {
-        if !lead[bytes[i] as usize] {
-            i += 1;
-            continue;
-        }
-        let rest = &bytes[i..];
-        let Some(len) = seps
-            .iter()
-            .filter(|s| rest.starts_with(s.as_bytes()))
-            .map(|s| s.len())
-            .max()
-        else {
-            i += 1;
-            continue;
-        };
-        let end = absorb_trailing(text, i + len);
-        if end > lim {
-            break;
-        }
-        if end > floor {
-            best = Some(end);
-        }
-        i = end;
-    }
-    best
-}
-
 fn floor_char_boundary(text: &str, i: usize) -> usize {
     let mut i = i.min(text.len());
     while !text.is_char_boundary(i) {
@@ -220,34 +118,25 @@ fn next_char_boundary(text: &str, i: usize) -> usize {
     i
 }
 
-struct Planner<'d, 't> {
+struct Planner<'d> {
     doc: &'d Doc<'d>,
-    tiers: &'t [Tier],
-    cuts: Cuts,
+    scans: Vec<Scan>,
     hi: usize,
     max: usize,
 }
 
-impl Planner<'_, '_> {
+impl Planner<'_> {
     /// The highest-priority cut in `(floor, lim]`, the latest of its tier.
-    fn best_cut(&self, s: usize, floor: usize, lim: usize) -> Option<usize> {
-        let text = self.doc.text;
-        self.tiers
-            .iter()
-            .zip(&self.cuts.eager)
-            .find_map(|(tier, eager)| match (tier, eager) {
-                (_, Some(cuts)) => {
-                    let i = cuts.partition_point(|&c| c <= lim);
-                    (i > 0 && cuts[i - 1] > floor).then(|| cuts[i - 1])
-                }
-                (Tier::Seps(seps), None) => last_cut(text, s, floor, lim, seps),
-                (Tier::Cuts(_), None) => None,
-            })
+    fn best_cut(&mut self, floor: usize, lim: usize) -> Option<usize> {
+        let (text, hi) = (self.doc.text, self.hi);
+        self.scans
+            .iter_mut()
+            .find_map(|scan| scan.last_in(text, hi, floor, lim))
     }
 
     /// End and token count of the chunk starting at `s` that must end after
     /// `floor`. Over budget only when it is one character past `floor`.
-    fn choose(&self, s: usize, floor: usize) -> (usize, usize) {
+    fn choose(&mut self, s: usize, floor: usize) -> (usize, usize) {
         let doc = self.doc;
         let text = doc.text;
         let one = next_char_boundary(text, floor);
@@ -257,7 +146,7 @@ impl Planner<'_, '_> {
             let e = if lim >= self.hi {
                 self.hi
             } else {
-                self.best_cut(s, floor, lim).unwrap_or_else(|| {
+                self.best_cut(floor, lim).unwrap_or_else(|| {
                     let e = floor_char_boundary(text, lim);
                     if e <= floor { one } else { e }
                 })
@@ -305,10 +194,16 @@ pub(crate) fn plan(
     if lo >= hi {
         return out;
     }
-    let planner = Planner {
+    let scans = tiers
+        .iter()
+        .map(|t| match t {
+            Tier::Seps(seps) => Scan::seps(seps, lo),
+            Tier::Cuts(cuts) => Scan::fixed(cuts, lo, hi),
+        })
+        .collect();
+    let mut planner = Planner {
         doc,
-        tiers,
-        cuts: Cuts::new(doc.text, lo, hi, tiers),
+        scans,
         hi,
         max,
     };
@@ -337,69 +232,4 @@ pub(crate) fn plan(
         };
     }
     out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::recursive::{TEXT_TIERS, split_at_any};
-
-    /// Piece ends of the plain splitter, minus the text end.
-    fn reference(text: &str, seps: &[&str]) -> Vec<usize> {
-        let mut ends = Vec::new();
-        let mut at = 0;
-        for p in split_at_any(text, seps) {
-            at += p.len();
-            if at < text.len() {
-                ends.push(at);
-            }
-        }
-        ends
-    }
-
-    #[test]
-    fn newline_cuts_match_the_plain_splitter() {
-        let alphabet = [
-            "a", " ", "\n", "\n\n", "\r\n", "\r", "」", "\n}\n", "\nend\n", "\n};\r\n", "}", "\t",
-        ];
-        let mut x: u64 = 0x9e37_79b9;
-        for _ in 0..3000 {
-            let mut text = String::new();
-            for _ in 0..30 {
-                x ^= x << 13;
-                x ^= x >> 7;
-                x ^= x << 17;
-                text.push_str(alphabet[(x % alphabet.len() as u64) as usize]);
-            }
-            for tier in TEXT_TIERS.iter().chain(crate::code::CODE_TIERS) {
-                if tier.iter().all(|s| s.contains('\n')) {
-                    assert_eq!(
-                        newline_cuts(&text, tier, 0),
-                        reference(&text, tier),
-                        "{text:?}"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn newline_offsets_are_at_most_one() {
-        for tier in TEXT_TIERS.iter().chain(crate::code::CODE_TIERS) {
-            for sep in tier.iter().filter(|s| s.contains('\n')) {
-                assert!(newline_offset(sep) <= 1, "{sep:?}");
-            }
-        }
-    }
-
-    #[test]
-    fn last_cut_matches_the_plain_splitter() {
-        let text = "One. Two! Three? Four. Five";
-        let seps = TEXT_TIERS[2];
-        let ends = reference(text, seps);
-        for lim in 0..=text.len() {
-            let want = ends.iter().copied().rfind(|&e| e <= lim);
-            assert_eq!(last_cut(text, 0, 0, lim, seps), want, "lim {lim}");
-        }
-    }
 }

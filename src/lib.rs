@@ -155,6 +155,7 @@ mod html;
 mod markdown;
 mod plan;
 pub(crate) mod recursive;
+mod scan;
 #[cfg(feature = "semantic")]
 mod semantic;
 
