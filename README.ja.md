@@ -221,3 +221,5 @@ cargo run --release -p bench-compare                          # 上の性能表�
 ## ライセンス
 
 [MIT](LICENSE-MIT) と [Apache-2.0](LICENSE-APACHE) のいずれかを選んで利用できます。
+
+tiktoken の `vocab-*` feature で組み込まれる語彙には、それぞれの公開元のライセンスが適用されます。一部は利用に条件があります（Llama、Mistral、DeepSeek、Kimi、MiniMax）。一覧は tiktoken の [LICENSE-3RD-PARTY](https://github.com/goliajp/rust-tiktoken/blob/develop/tiktoken/LICENSE-3RD-PARTY) にあります。語彙の feature を有効にしないビルドには、その語彙は含まれません。

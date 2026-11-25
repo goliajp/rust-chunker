@@ -221,3 +221,5 @@ cargo run --release -p bench-compare                          # 生成上面的�
 ## 许可证
 
 可任选 [MIT](LICENSE-MIT) 或 [Apache-2.0](LICENSE-APACHE) 许可证。
+
+通过 tiktoken 的 `vocab-*` feature 编译进来的词表沿用各自发布方的许可证，其中一些对使用有条件（Llama、Mistral、DeepSeek、Kimi、MiniMax）。清单见 tiktoken 的 [LICENSE-3RD-PARTY](https://github.com/goliajp/rust-tiktoken/blob/develop/tiktoken/LICENSE-3RD-PARTY)。没有开启某个词表的 feature，构建产物里就不含这份词表。

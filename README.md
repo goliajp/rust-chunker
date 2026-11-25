@@ -221,3 +221,5 @@ cargo run --release -p bench-compare                          # the tables above
 ## License
 
 Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
+
+The vocabularies compiled in through tiktoken's `vocab-*` features keep their publishers' licenses, some with conditions on use (Llama, Mistral, DeepSeek, Kimi, MiniMax). tiktoken's [LICENSE-3RD-PARTY](https://github.com/goliajp/rust-tiktoken/blob/develop/tiktoken/LICENSE-3RD-PARTY) lists them; a build without a vocabulary's feature does not contain that vocabulary.
