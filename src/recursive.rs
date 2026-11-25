@@ -226,6 +226,8 @@ pub(crate) fn merge_pieces(
     let mut current_tokens = 0usize;
     let mut current_start = 0usize; // byte offset within original_text
     let mut piece_end = 0usize;
+    // false while `current` holds only overlap carried from the previous chunk
+    let mut fresh = false;
 
     for piece in pieces {
         let piece_tokens = encoder.count(piece);
@@ -233,17 +235,18 @@ pub(crate) fn merge_pieces(
 
         // single piece exceeds max — recurse with finer separator
         if piece_tokens > max_tokens {
-            // flush current buffer first
-            if !current.is_empty() {
+            // flush current buffer first; overlap alone is not a chunk
+            if fresh {
                 chunks.push(make_chunk(
                     &current,
                     text_offset + current_start,
                     encoder,
                     section_path,
                 ));
-                current.clear();
-                current_tokens = 0;
             }
+            current.clear();
+            current_tokens = 0;
+            fresh = false;
 
             let sub_chunks = descend(piece, text_offset + piece_offset, ctx, next_tier);
             chunks.extend(sub_chunks);
@@ -252,7 +255,11 @@ pub(crate) fn merge_pieces(
             continue;
         }
 
-        // would adding this piece overflow?
+        // would adding this piece overflow? overlap alone gives way to the piece
+        if current_tokens + piece_tokens > max_tokens && !fresh {
+            current.clear();
+            current_tokens = 0;
+        }
         if current_tokens + piece_tokens > max_tokens && !current.is_empty() {
             chunks.push(make_chunk(
                 &current,
@@ -283,10 +290,11 @@ pub(crate) fn merge_pieces(
         current.push_str(piece);
         current_tokens += piece_tokens;
         piece_end = piece_offset + piece.len();
+        fresh = true;
     }
 
     // flush remaining
-    if !current.is_empty() {
+    if fresh {
         chunks.push(make_chunk(
             &current,
             text_offset + current_start,
@@ -347,10 +355,8 @@ fn split_by_tokens(
     //
     // A single character can span several tokens (rare CJK and emoji fall back
     // to byte-level tokens), so a raw token boundary is not necessarily a
-    // character boundary. Snapping *back* rather than forward keeps each slice
-    // a subset of its token window, which is what preserves the `max_tokens`
-    // guarantee; the bytes trimmed here are picked up by the next chunk, so the
-    // split stays lossless.
+    // character boundary. Snapping *back* keeps each slice a subset of its
+    // token window; the bytes trimmed here go to the next chunk.
     let mut boundaries = Vec::with_capacity(tokens.len() + 1);
     boundaries.push(0usize);
     let mut acc = 0usize;
@@ -359,45 +365,73 @@ fn split_by_tokens(
         boundaries.push(floor_char_boundary(text, acc));
     }
 
-    let mut start = 0;
-
-    while start < tokens.len() {
-        let end = (start + max_tokens).min(tokens.len());
-
-        let byte_start = boundaries[start];
-        let byte_end = boundaries[end];
-
-        // Skip windows that collapse to nothing — every token in them was a
-        // partial byte sequence of a character the next window will emit whole.
-        if byte_end > byte_start {
-            let content = text[byte_start..byte_end].to_string();
-            // Re-count rather than trusting `end - start`: the boundary snap can
-            // trim bytes, and a stored count that disagrees with the content
-            // would be a lie in the one field users budget against.
-            let token_count = encoder.count(&content);
-
-            chunks.push(Chunk {
-                content,
-                index: chunks.len(),
-                start_byte: text_offset + byte_start,
-                end_byte: text_offset + byte_end,
-                start_token: 0,
-                end_token: 0,
-                token_count,
-                section_path: section_path.to_vec(),
-            });
+    let mut start = 0usize;
+    let mut byte_start = 0usize;
+    let mut prev_end = 0usize;
+    while byte_start < text.len() {
+        let mut byte_end = boundaries[(start + max_tokens).min(tokens.len())];
+        if byte_end <= prev_end {
+            // the window ends where the previous chunk did: drop the overlap
+            byte_start = byte_start.max(prev_end);
         }
+        byte_end = byte_end.max(next_char_boundary(text, byte_start.max(prev_end)));
+        let (byte_end, token_count) = fit(text, byte_start, byte_end, max_tokens, encoder);
 
-        // guarantee forward progress even with large overlap
-        let advance = if overlap_tokens > 0 && end < tokens.len() {
-            max_tokens.saturating_sub(overlap_tokens).max(1)
+        chunks.push(Chunk {
+            content: text[byte_start..byte_end].to_string(),
+            index: chunks.len(),
+            start_byte: text_offset + byte_start,
+            end_byte: text_offset + byte_end,
+            start_token: 0,
+            end_token: 0,
+            token_count,
+            section_path: section_path.to_vec(),
+        });
+        prev_end = byte_end;
+
+        let next = if overlap_tokens > 0 {
+            boundaries[(start + max_tokens.saturating_sub(overlap_tokens).max(1)).min(tokens.len())]
+                .min(byte_end)
         } else {
-            max_tokens
+            byte_end
         };
-        start += advance;
+        byte_start = if next > byte_start { next } else { byte_end };
+        // first token whose window can start at `byte_start`
+        start = boundaries.partition_point(|&b| b <= byte_start) - 1;
     }
 
     chunks
+}
+
+/// Shrink `start..end` one character at a time until it fits `max_tokens`.
+/// A single character is never cut, so it is returned even when it does not
+/// fit. Returns the end and the token count of what was kept.
+pub(crate) fn fit(
+    text: &str,
+    start: usize,
+    mut end: usize,
+    max_tokens: usize,
+    encoder: &CoreBpe,
+) -> (usize, usize) {
+    let mut count = encoder.count(&text[start..end]);
+    while count > max_tokens {
+        let prev = floor_char_boundary(text, end - 1);
+        if prev <= start {
+            break;
+        }
+        end = prev;
+        count = encoder.count(&text[start..end]);
+    }
+    (end, count)
+}
+
+/// Smallest character boundary above `i`, or the text length.
+fn next_char_boundary(text: &str, i: usize) -> usize {
+    let mut i = (i + 1).min(text.len());
+    while !text.is_char_boundary(i) {
+        i += 1;
+    }
+    i
 }
 
 /// Largest character boundary at or below `i`.
@@ -429,10 +463,12 @@ fn make_chunk(
 
 /// take approximately `n` tokens from the end of text, preserving valid UTF-8.
 /// returns a substring of the original text (no lossy conversion).
+/// Never the whole text: the next chunk must start after this one did.
 fn take_suffix_tokens(text: &str, n: usize, encoder: &CoreBpe) -> String {
     let tokens = encoder.encode(text);
-    if tokens.len() <= n {
-        return text.to_string();
+    let n = n.min(tokens.len().saturating_sub(1));
+    if n == 0 {
+        return String::new();
     }
     let prefix_byte_len = encoder.decode(&tokens[..tokens.len() - n]).len();
     // find next char boundary (BPE tokens may split multi-byte chars)
@@ -623,10 +659,11 @@ mod tests {
     }
 
     #[test]
-    fn take_suffix_tokens_more_than_available() {
+    fn take_suffix_tokens_never_takes_everything() {
         let enc = encoder();
-        let suffix = take_suffix_tokens("hi", 100, enc);
-        assert_eq!(suffix, "hi");
+        assert_eq!(take_suffix_tokens("hi", 100, enc), "");
+        let suffix = take_suffix_tokens("hello world foo", 100, enc);
+        assert!(!suffix.is_empty() && suffix.len() < "hello world foo".len());
     }
 
     #[test]
