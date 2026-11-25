@@ -40,7 +40,7 @@ pub(crate) enum Strategy {
 /// [`.split()`](ChunkBuilder::split).
 ///
 /// [`.semantic()`](ChunkBuilder::semantic) converts this into a
-/// [`SemanticChunkBuilder`], which offers only `.split_async()` — semantic
+/// [`SemanticChunkBuilder`], which offers only `.split_async()`: semantic
 /// splitting makes network calls, so there is no synchronous `.split()` to
 /// call by mistake.
 pub struct ChunkBuilder<'a> {
@@ -66,8 +66,8 @@ impl<'a> ChunkBuilder<'a> {
 
     /// Set the number of overlapping tokens between consecutive chunks. Default: 0.
     ///
-    /// Overlap ensures context is not lost at chunk boundaries — important for
-    /// retrieval quality in RAG pipelines.
+    /// Each chunk after the first starts about this many tokens before the
+    /// previous one ended, on a character boundary.
     ///
     /// ```rust
     /// let chunks = chunkedrs::chunk("hello world").overlap(50).split();
@@ -91,7 +91,7 @@ impl<'a> ChunkBuilder<'a> {
     ///
     /// If the model name is not recognized, falls back to `o200k_base` silently.
     /// Anthropic and Google publish no tiktoken-compatible vocabulary, so
-    /// `claude-*` and `gemini-*` take that fallback — an approximation, not an
+    /// `claude-*` and `gemini-*` take that fallback, an approximation, not an
     /// exact count.
     ///
     /// A model whose vocabulary was not compiled in takes the same fallback.
@@ -112,7 +112,7 @@ impl<'a> ChunkBuilder<'a> {
     ///
     /// If the encoding name is not recognized, falls back to `o200k_base`
     /// silently. Since tiktoken 4 a vocabulary that was not compiled in is
-    /// *also* unrecognized, and looks identical to a typo — so a slimmed build
+    /// *also* unrecognized, and looks identical to a typo, so a slimmed build
     /// that asks for a vocabulary it did not enable gets `o200k_base` counts
     /// without complaint. See [vocabulary features](crate#vocabulary-features).
     ///
@@ -154,7 +154,7 @@ impl<'a> ChunkBuilder<'a> {
     /// Boundary-aware, **not** AST-aware: this splits on blank lines, block
     /// braces at low nesting depth, and dedents, in that order, then falls back
     /// to the ordinary text ladder. It parses nothing and adds no dependencies,
-    /// so it works on any language — and it will not track a construct across a
+    /// so it works on any language, and it will not track a construct across a
     /// boundary the way a real parser would. If you need AST fidelity, use a
     /// tree-sitter based splitter.
     ///
@@ -192,7 +192,7 @@ impl<'a> ChunkBuilder<'a> {
     /// consecutive sentence embeddings. When similarity drops below the
     /// threshold, a new chunk begins.
     ///
-    /// Returns a [`SemanticChunkBuilder`], which has no `.split()` — semantic
+    /// Returns a [`SemanticChunkBuilder`], which has no `.split()`: semantic
     /// splitting makes network calls, so the synchronous method simply does not
     /// exist on it. This used to be a runtime panic.
     ///

@@ -1,25 +1,29 @@
 //! # chunkedrs
 //!
-//! AI-native text chunking — split long documents into token-accurate pieces for
-//! embedding and retrieval. Built on [tiktoken](https://crates.io/crates/tiktoken)
-//! for precise token counting.
+//! Split long documents into chunks that fit a token budget, for embedding and
+//! retrieval. Token counts come from [tiktoken](https://crates.io/crates/tiktoken);
+//! every chunk carries its exact byte range in the source and its token range
+//! in the document's token stream.
 //!
-//! ## Design: 用就要好用
+//! ## Strategies
 //!
-//! Three strategies, each done right:
+//! | Strategy | Splits on |
+//! |----------|-----------|
+//! | **Recursive** (default) | paragraphs, lines, sentences (CJK marks included), clauses, words, then tokens |
+//! | **Markdown** | ATX and setext headers first, keeping the header ancestry on each chunk |
+//! | **Code** | blank lines, brackets closing a block at column 0, lines, words |
+//! | **HTML** | block-level closing tags, then the recursive ladder |
+//! | **Semantic** | sentence groups whose embeddings stay similar (`semantic` feature, network calls) |
 //!
-//! | Strategy | Use case | Speed |
-//! |----------|----------|-------|
-//! | **Recursive** (default) | General text — paragraphs, sentences, clauses, words | Fastest |
-//! | **Markdown** | Documents with headers — preserves section ancestry | Fast |
-//! | **Code** | Source in any language — blank lines, block closers, lines | Fast |
-//! | **HTML** | Web pages — block-level tag boundaries | Fast |
-//! | **Semantic** | High-quality RAG — splits at meaning boundaries via embeddings | Slower (API calls) |
+//! Each chunk ends at the last boundary of the highest-priority kind that
+//! still fits `max_tokens`, and its `token_count` is counted on its own text,
+//! so `token_count <= max_tokens` holds for every chunk. The one exception is
+//! a single character that alone takes more tokens than the budget.
 //!
 //! ## Late chunking
 //!
 //! Every chunk carries `start_token..end_token`: its range in the *document's*
-//! token stream. That is what [late chunking] needs — embed the document once,
+//! token stream. That is what [late chunking] needs: embed the document once,
 //! then pool each chunk's vector over its own range, so each chunk embedding
 //! carries the context of the whole document rather than only its own text.
 //!
@@ -64,7 +68,24 @@
 //! }
 //! ```
 //!
-//! ## Token-accurate splitting
+//! ## Many documents
+//!
+//! [`Chunker`] holds a configuration with its encoder resolved once.
+//! [`Chunker::split_batch`] splits a slice of texts on all cores and returns
+//! the results in input order.
+//!
+//! ```rust
+//! let chunker = chunkedrs::Chunker::new().max_tokens(256);
+//! let docs = ["First document.", "Second document."];
+//! let chunks = chunker.split_batch(&docs);
+//! assert_eq!(chunks[1][0].content, "Second document.");
+//! ```
+//!
+//! tiktoken encodes a text of 32 KiB or more on several threads. A server
+//! that already keeps every core busy can turn that off with
+//! `TIKTOKEN_THREADS=1` or [`tiktoken::set_parallelism`]`(1)`.
+//!
+//! ## Token budget
 //!
 //! ```rust
 //! let chunks = chunkedrs::chunk("your long text here...")
@@ -108,22 +129,23 @@
 //! ## Vocabulary features
 //!
 //! Tokenizer vocabularies are the bulk of this crate's compiled size, and most
-//! builds use one. They are opt-out: the default carries all 17 encodings, and
-//! `default-features = false` keeps only `o200k_base` — the encoder every
+//! builds use one. They are opt-out: the default carries all 20 encodings, and
+//! `default-features = false` keeps only `o200k_base`, the encoder every
 //! unresolved name falls back to, so it is never absent.
 //!
 //! ```toml
 //! # everything (default)
 //! chunkedrs = "2"
 //!
-//! # o200k_base only — GPT-4o, GPT-5, o-series
+//! # o200k_base only: GPT-4o, GPT-5, o-series
 //! chunkedrs = { version = "2", default-features = false }
 //!
 //! # o200k_base plus the Zhipu family
 //! chunkedrs = { version = "2", default-features = false, features = ["vocab-zhipu"] }
 //! ```
 //!
-//! Measured on `examples/basic`, release: **7,100,544 → 2,695,104 bytes**, 62%.
+//! `examples/basic`, release build on macOS arm64: 9,189,376 bytes with every
+//! vocabulary, 2,072,256 bytes with `default-features = false`.
 //!
 //! Features come in vendor groups (`vocab-openai`, `vocab-meta`,
 //! `vocab-deepseek`, `vocab-qwen`, `vocab-mistral`, `vocab-moonshot`,
@@ -218,7 +240,7 @@ impl std::fmt::Display for Error {
 
     /// Without the `semantic` feature nothing in this crate can fail, so
     /// `Error` has no variants. Matching an uninhabited value with no arms is
-    /// how you say that to the compiler — no `unreachable!()` required.
+    /// how you say that to the compiler; no `unreachable!()` required.
     #[cfg(not(feature = "semantic"))]
     fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match *self {}
