@@ -54,8 +54,14 @@ impl Matcher {
 }
 
 /// The cuts of one tier: given by the strategy, or found on demand.
+///
+/// Newline tiers are scanned forward, newline to newline. Other tiers have a
+/// match every few dozen bytes in prose, so they are searched backwards from
+/// the window's end, which stops at the first match instead of reading the
+/// whole window.
 pub(crate) enum Scan {
     Fixed(Vec<usize>),
+    Back(Box<Matcher>),
     Seps {
         matcher: Box<Matcher>,
         cuts: Vec<usize>,
@@ -70,8 +76,12 @@ impl Scan {
     }
 
     pub fn seps(seps: &[&'static str], lo: usize) -> Self {
+        let matcher = Matcher::new(seps);
+        if !matcher.newline {
+            return Scan::Back(Box::new(matcher));
+        }
         Scan::Seps {
-            matcher: Box::new(Matcher::new(seps)),
+            matcher: Box::new(matcher),
             cuts: Vec::new(),
             pos: lo,
         }
@@ -93,6 +103,7 @@ impl Scan {
         lim: usize,
     ) -> Option<usize> {
         let cuts = match self {
+            Scan::Back(matcher) => return last_before(matcher, &text[..hi], from, floor, lim),
             Scan::Fixed(cuts) => cuts,
             Scan::Seps { matcher, cuts, pos } => {
                 *pos = (*pos).max(from);
@@ -105,6 +116,28 @@ impl Scan {
         let i = cuts.partition_point(|&c| c <= lim);
         (i > 0 && cuts[i - 1] > floor).then(|| cuts[i - 1])
     }
+}
+
+/// The last piece end in `(floor, lim]` of a match that starts at or after
+/// `from`, found by walking back from `lim`.
+fn last_before(m: &Matcher, text: &str, from: usize, floor: usize, lim: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut i = lim.min(bytes.len());
+    while i > from {
+        i -= 1;
+        if m.first[bytes[i] as usize] == 0 {
+            continue;
+        }
+        let Some(len) = m.at(bytes, i) else { continue };
+        let end = absorb_trailing(text, i + len);
+        if end <= floor {
+            return None;
+        }
+        if end <= lim && end < bytes.len() {
+            return Some(end);
+        }
+    }
+    None
 }
 
 /// Scan `text` from `pos` until a match starting at or after `until` would be
