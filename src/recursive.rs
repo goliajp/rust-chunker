@@ -382,7 +382,7 @@ fn split_by_tokens(
     boundaries.push(0usize);
     let mut acc = 0usize;
     for &t in &tokens {
-        acc += encoder.decode(&[t]).len();
+        acc += crate::token_len(encoder, t);
         boundaries.push(floor_char_boundary(text, acc));
     }
 

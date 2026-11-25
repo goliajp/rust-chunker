@@ -16,7 +16,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 chunkedrs = { path = "..", default-features = false, features = ["vocab-cl100k_base"] }
-tiktoken = { version = "5.4", default-features = false, features = ["vocab-o200k_base", "vocab-cl100k_base"] }
+tiktoken = { version = "5.5", default-features = false, features = ["vocab-o200k_base", "vocab-cl100k_base"] }
 tiktoken-rs = "=0.12.1"
 text-splitter = { version = "=0.33.6", features = ["tiktoken-rs", "markdown", "code"] }
 tree-sitter-rust = "0.24"

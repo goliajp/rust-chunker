@@ -198,7 +198,7 @@ fn assign_token_spans(chunks: &mut [Chunk], text: &str, encoder: &tiktoken::Core
     let mut acc = 0usize;
     for &t in &tokens {
         starts.push(acc);
-        acc += encoder.decode(&[t]).len();
+        acc += crate::token_len(encoder, t);
     }
     starts.push(acc);
 
@@ -223,6 +223,14 @@ fn assign_token_spans(chunks: &mut [Chunk], text: &str, encoder: &tiktoken::Core
         chunk.start_token = start;
         chunk.end_token = end.max(start);
     }
+}
+
+/// Byte length of one token, borrowed from the vocabulary. A token may end
+/// inside a multi-byte character, so a summed offset is not always a char
+/// boundary.
+#[inline]
+pub(crate) fn token_len(encoder: &tiktoken::CoreBpe, token: u32) -> usize {
+    encoder.token_bytes(token).map_or(0, <[u8]>::len)
 }
 
 /// find byte offset of a substring within the parent string using pointer arithmetic
