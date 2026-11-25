@@ -131,6 +131,41 @@ fn candidates(corpus: &str, enc_name: &'static str, max: usize) -> Vec<(&'static
     out
 }
 
+/// 64 documents (each corpus 16 times): one thread vs `split_batch`.
+fn batch(dir: &str, corpora: &[&str]) {
+    let texts: Vec<String> = corpora
+        .iter()
+        .map(|c| std::fs::read_to_string(format!("{dir}/{c}")).unwrap())
+        .collect();
+    let docs: Vec<&str> = (0..16)
+        .flat_map(|_| texts.iter().map(String::as_str))
+        .collect();
+    let chunker = chunkedrs::Chunker::new().max_tokens(512);
+    let bytes: usize = docs.iter().map(|d| d.len()).sum();
+    println!(
+        "\n## batch: {} documents, {bytes} B, o200k_base max_tokens=512",
+        docs.len()
+    );
+    let one = |_: &str| -> Vec<String> {
+        let n: usize = docs.iter().map(|d| chunker.split(d).len()).sum();
+        vec![n.to_string()]
+    };
+    let many = |_: &str| -> Vec<String> {
+        let n: usize = chunker.split_batch(&docs).iter().map(Vec::len).sum();
+        vec![n.to_string()]
+    };
+    println!(
+        "{:<40} {:>9.3} ms",
+        "Chunker::split, one by one",
+        median_ms("", &one)
+    );
+    println!(
+        "{:<40} {:>9.3} ms",
+        "Chunker::split_batch",
+        median_ms("", &many)
+    );
+}
+
 fn main() {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/data");
     let only = std::env::args().nth(1);
@@ -170,5 +205,8 @@ fn main() {
                 }
             }
         }
+    }
+    if only.is_none() {
+        batch(dir, &corpora);
     }
 }

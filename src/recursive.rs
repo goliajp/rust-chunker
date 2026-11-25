@@ -66,6 +66,7 @@ pub(crate) fn split_recursive(doc: &Doc<'_>, max_tokens: usize, overlap: usize) 
 /// The earliest match wins; ties go to the longest separator so `"\r\n"` is not
 /// shadowed by `"\n"`. Any run of [`TRAILING_ABSORB`] following the match is
 /// pulled back into the same piece.
+#[cfg(any(test, feature = "semantic"))]
 pub(crate) fn split_at_any<'a>(text: &'a str, seps: &[&str]) -> Vec<&'a str> {
     let bytes = text.as_bytes();
     // one forward pass: only bytes that can start a separator are tried
