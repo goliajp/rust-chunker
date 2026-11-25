@@ -2,14 +2,13 @@
 name = "chunkedrs"
 version = "2.1.1"
 edition = "2024"
-description = "AI-native text chunking — recursive, markdown, code, HTML and semantic splitting with token-accurate boundaries and token spans for late chunking"
-license = "MIT"
+description = "Split text into chunks that fit a token budget, for embedding and retrieval: recursive, markdown, code, HTML and semantic strategies, exact byte ranges and document token spans"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/goliajp/rust-chunker"
-homepage = "https://github.com/goliajp/rust-chunker"
 authors = ["GOLIA株式会社", "Li Hao <lihao@golia.jp>"]
 documentation = "https://docs.rs/chunkedrs"
-keywords = ["chunking", "rag", "text-splitting", "tokenizer", "ai"]
-categories = ["text-processing"]
+keywords = ["chunking", "rag", "text-splitter", "tiktoken", "embeddings"]
+categories = ["text-processing", "algorithms"]
 readme = "README.md"
 
 [dependencies]

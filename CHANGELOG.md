@@ -328,13 +328,12 @@ text, so re-chunking and re-embedding is the whole of the migration.
 ## [1.0.2] - 2026-04-24
 
 ### Changed
-- Migrated from `goliajp/airs` mono-repo to standalone `goliajp/rust-chunker`.
-  No code changes; `repository` URL updated. `tiktoken` and `embedrs` deps
-  now resolved via crates.io instead of workspace path.
+- Moved to its own repository, `goliajp/rust-chunker`. No code changes;
+  `repository` URL updated, `tiktoken` and `embedrs` come from crates.io.
 
 ## [1.0.1] - 2026-04
 
-- Previous release (from `goliajp/airs`).
+- Maintenance release.
 
 ## [1.0.0] - 2026-04
 
