@@ -18,7 +18,7 @@ use tiktoken::CoreBpe;
 /// The prose tiers are deliberately absent below the line tier: splitting code
 /// on `". "` cuts inside string literals and doc comments, which is worse than
 /// splitting on a word boundary.
-const CODE_TIERS: &[&[&str]] = &[
+pub(crate) const CODE_TIERS: &[&[&str]] = &[
     // blank lines — top-level definitions in nearly every language
     &["\r\n\r\n", "\n\n"],
     // a bracket closing a block at column 0, alone on its line

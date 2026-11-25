@@ -159,24 +159,37 @@ fn descend(text: &str, text_offset: usize, ctx: Ctx<'_>, tier: usize) -> Vec<Chu
 /// shadowed by `"\n"`. Any run of [`TRAILING_ABSORB`] following the match is
 /// pulled back into the same piece.
 pub(crate) fn split_at_any<'a>(text: &'a str, seps: &[&str]) -> Vec<&'a str> {
+    let bytes = text.as_bytes();
+    // one forward pass: only bytes that can start a separator are tried
+    let mut lead = [false; 256];
+    for sep in seps {
+        lead[sep.as_bytes()[0] as usize] = true;
+    }
+
     let mut pieces = Vec::new();
     let mut start = 0;
-    let mut search = 0;
-
-    while search < text.len() {
-        let hit = seps
+    let mut i = 0;
+    while i < bytes.len() {
+        if !lead[bytes[i] as usize] {
+            i += 1;
+            continue;
+        }
+        let rest = &bytes[i..];
+        let Some(len) = seps
             .iter()
-            .filter_map(|s| text[search..].find(s).map(|p| (search + p, s.len())))
-            .min_by_key(|&(pos, len)| (pos, std::cmp::Reverse(len)));
-
-        let Some((pos, len)) = hit else { break };
-
-        let end = absorb_trailing(text, pos + len);
+            .filter(|s| rest.starts_with(s.as_bytes()))
+            .map(|s| s.len())
+            .max()
+        else {
+            i += 1;
+            continue;
+        };
+        let end = absorb_trailing(text, i + len);
         if end > start {
             pieces.push(&text[start..end]);
         }
         start = end;
-        search = end;
+        i = end;
     }
 
     // remaining text after the last separator
@@ -535,6 +548,54 @@ mod tests {
     fn split_at_any_absorbs_repeated_terminals() {
         let pieces = split_at_any("真的？！那好吧。", &["。", "？"]);
         assert_eq!(pieces, vec!["真的？！", "那好吧。"]);
+    }
+
+    /// The straightforward version: `find` every separator from the cursor and
+    /// keep the earliest, longest match.
+    fn split_at_any_reference<'a>(text: &'a str, seps: &[&str]) -> Vec<&'a str> {
+        let (mut pieces, mut start, mut search) = (Vec::new(), 0, 0);
+        while search < text.len() {
+            let hit = seps
+                .iter()
+                .filter_map(|s| text[search..].find(s).map(|p| (search + p, s.len())))
+                .min_by_key(|&(pos, len)| (pos, std::cmp::Reverse(len)));
+            let Some((pos, len)) = hit else { break };
+            let end = absorb_trailing(text, pos + len);
+            if end > start {
+                pieces.push(&text[start..end]);
+            }
+            start = end;
+            search = end;
+        }
+        if start < text.len() {
+            pieces.push(&text[start..]);
+        }
+        pieces
+    }
+
+    #[test]
+    fn split_at_any_matches_reference() {
+        let alphabet = [
+            "a", "bc", " ", ". ", "\n", "\n\n", "\r\n", "。", "」", "，", "…", "? ", "\t", "語",
+            "\n}\n", "end", ")", "\u{3000}",
+        ];
+        let mut x: u64 = 0x2545_f491;
+        for _ in 0..2000 {
+            let mut text = String::new();
+            for _ in 0..40 {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                text.push_str(alphabet[(x % alphabet.len() as u64) as usize]);
+            }
+            for tier in TEXT_TIERS.iter().chain(crate::code::CODE_TIERS) {
+                assert_eq!(
+                    split_at_any(&text, tier),
+                    split_at_any_reference(&text, tier),
+                    "{text:?}"
+                );
+            }
+        }
     }
 
     #[test]
