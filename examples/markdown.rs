@@ -37,7 +37,7 @@ preserving document structure matters for retrieval quality.
 
 Every chunk is guaranteed to contain no more than the configured maximum number \
 of tokens. The library uses tiktoken for precise BPE token counting, supporting \
-all mainstream LLM tokenizers including GPT-4o, Claude, Llama, and DeepSeek.
+the vocabularies of GPT-4o, Llama, Qwen, DeepSeek and other open models.
 ";
 
     let chunks = chunkedrs::chunk(document).markdown().max_tokens(40).split();
