@@ -7,7 +7,7 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md) | **日本語**
 
-> **2.1 からのアップグレード**：API の変更はありませんが、チャンクの境界が変わるため、作成済みのインデックスはチャンク分割をやり直してください。tiktoken 5 で Llama 4、Qwen 3.5〜3.8、Mistral Large 4、`deepseek-flash` が実際の語彙を使うようになり、これらのモデルのトークン数が変わります。新しい分割アルゴリズムでも、一部のチャンクが 2.1 と異なる位置で終わります。32 KiB 以上の文書は複数のスレッドでエンコードされるようになりました。`TIKTOKEN_THREADS=1` で無効にできます。詳細は [CHANGELOG](CHANGELOG.md#upgrading-from-21) を参照してください。
+> **2.1 からの更新**：API の変更はありませんが、チャンクの境界が変わるため、作成済みのインデックスはチャンク分割をやり直してください。tiktoken 5 で Llama 4、Qwen 3.5〜3.8、Mistral Large 4、`deepseek-flash` が実際の語彙を使うようになり、これらのモデルのトークン数が変わります。新しい分割アルゴリズムでも、一部のチャンクが 2.1 と異なる位置で終わります。32 KiB 以上の文書は複数のスレッドでエンコードされるようになりました。`TIKTOKEN_THREADS=1` で無効にできます。詳細は [CHANGELOG](CHANGELOG.md#upgrading-from-21) を参照してください。
 
 chunkedrs は、長い文書をトークン数の上限に収まるチャンクに分割するライブラリです。埋め込みと検索での利用を想定しています。トークン数は [tiktoken](https://crates.io/crates/tiktoken) で数え、20 種類のエンコーディング（OpenAI、Llama、DeepSeek、Qwen、Mistral、Kimi、GLM、MiniMax）に対応します。各チャンクは、元の文書でのバイト範囲と、文書全体のトークン列での範囲を持ちます。依存は tiktoken だけで、`semantic` feature を有効にすると [embedrs](https://crates.io/crates/embedrs) が加わります。
 
