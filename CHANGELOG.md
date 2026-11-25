@@ -5,7 +5,68 @@ All notable changes to this crate will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Upgrading from 1.x to 2.0 — migration
+## [2.2.0] - 2026-11-25
+
+### Upgrading from 2.1
+
+No API change; code that builds against 2.1 builds against this release.
+Chunk boundaries move, so re-chunk and re-embed stored indexes:
+
+- **tiktoken 5.5.** Token counts change for the model names tiktoken 5.0
+  moved to their own vocabularies: `llama-4*` and `muse-*` now use `llama4`,
+  `qwen3.5*` to `qwen3.8*` and `qwen4*` use `qwen3_5`, `mistral-large-4*` and
+  `mistral-large-latest` use `mistral_v15`, `deepseek-flash` uses
+  `deepseek_v4`. `gpt-6*` resolves to `o200k_base`. 2.1 resolved these names to
+  older vocabularies or to the `o200k_base` fallback.
+- **New planner.** A chunk ends at the last boundary of the highest-priority
+  kind that fits, measured on one encode of the whole document. Boundaries
+  are the same as 2.1 on most text and differ where 2.1 summed the token
+  counts of separate pieces.
+- **Overlap.** Applies between every pair of consecutive chunks of a section
+  and never repeats or rewinds a chunk (2.1 could emit a chunk made only of
+  the previous chunk's tail, or start a chunk before the previous one).
+- **Threads.** tiktoken 5.2 and later encode a text of 32 KiB or more on
+  several threads by default. chunkedrs encodes each document once, so
+  documents of that size use them. `TIKTOKEN_THREADS=1` or
+  `tiktoken::set_parallelism(1)` keeps tiktoken on the calling thread.
+
+### Added
+
+- `Chunker`: a configuration with its encoder resolved once, reusable across
+  texts; `Chunker::split_batch` splits a slice of texts on all cores with
+  `std::thread::scope` and returns the results in input order.
+- Features `vocab-llama4`, `vocab-qwen3_5` and `vocab-mistral_v15`, forwarded
+  to tiktoken.
+- `bench-compare/`, a harness that times chunkedrs against text-splitter on
+  four public corpora (not published).
+
+### Changed
+
+- Faster. On an Apple M4 Pro, one thread, `o200k_base`, 512 tokens per
+  chunk, compared with the 2.1 code on tiktoken 5.4: a 200 KB English book
+  10.9 ms to 0.35 ms, 179 KB of Chinese 4.2 ms to 0.42 ms (markdown 2.2 ms to
+  0.48 ms), 100 KB of Rust source 2.0 ms to 0.20 ms. The document is encoded
+  once, each chunk is counted once, separators are found without rescanning,
+  and token lengths come from tiktoken's `token_bytes` instead of decoding
+  every token. The README has the full table against text-splitter.
+- Requires tiktoken 5.5.
+- License: `MIT OR Apache-2.0` (was `MIT`).
+
+### Fixed
+
+- Token-level cuts held the budget only per token window: a character that
+  spans several tokens could push a chunk over `max_tokens`. A chunk is now
+  over budget only when it is a single character that alone needs more
+  tokens than `max_tokens`.
+- Semantic splitting: a whitespace-only sentence inside a group shifted the
+  byte offsets of the chunks after it, so `start_byte..end_byte` no longer
+  addressed the source.
+- Semantic splitting sent all sentences in one embedding request, which failed
+  with `InputTooLarge` once a document had more sentences than the provider
+  accepts per request (96 for Cohere, 2048 for OpenAI). Requests are now split
+  to the provider's batch size.
+
+## Upgrading from 1.x to 2.0: migration
 
 Two mechanical renames and one API shape change.
 
@@ -328,13 +389,12 @@ text, so re-chunking and re-embedding is the whole of the migration.
 ## [1.0.2] - 2026-04-24
 
 ### Changed
-- Migrated from `goliajp/airs` mono-repo to standalone `goliajp/rust-chunker`.
-  No code changes; `repository` URL updated. `tiktoken` and `embedrs` deps
-  now resolved via crates.io instead of workspace path.
+- Moved to its own repository, `goliajp/rust-chunker`. No code changes;
+  `repository` URL updated, `tiktoken` and `embedrs` come from crates.io.
 
 ## [1.0.1] - 2026-04
 
-- Previous release (from `goliajp/airs`).
+- Maintenance release.
 
 ## [1.0.0] - 2026-04
 

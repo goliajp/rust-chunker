@@ -1,0 +1,22 @@
+# Comparison harness: chunkedrs vs text-splitter on identical corpora and the
+# same timing discipline (warmup, then the median of 9 rounds). Never
+# published; text-splitter and tiktoken-rs stay out of the shipped crate.
+#
+# Corpora in data/:
+#   book_en.txt       Pride and Prejudice, chapters 2 onwards (public domain)
+#   zh_xiyouji.md     Journey to the West, chapters 1-9, from Wikisource (public domain)
+#   md_rust_book.md   The Rust Programming Language, chapters 3-6 (MIT OR Apache-2.0)
+#   code_rust.txt     Rust source of the tiktoken crate (MIT OR Apache-2.0)
+[package]
+name = "bench-compare"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+chunkedrs = { path = "..", default-features = false, features = ["vocab-cl100k_base"] }
+tiktoken = { version = "5.5", default-features = false, features = ["vocab-o200k_base", "vocab-cl100k_base"] }
+tiktoken-rs = "=0.12.1"
+text-splitter = { version = "=0.33.6", features = ["tiktoken-rs", "markdown", "code"] }
+tree-sitter-rust = "0.24"

@@ -9,11 +9,11 @@ fn main() {
     let document = "\
 # Introduction
 
-Chunkedrs is an AI-native text chunking library for Rust. It splits long documents \
-into token-accurate pieces suitable for embedding and retrieval pipelines.
+chunkedrs is a text chunking library for Rust. It splits long documents \
+into pieces that fit a token budget, for embedding and retrieval pipelines.
 
-The library supports three strategies: recursive (default), markdown-aware, and \
-semantic (via embeddings).
+The library has five strategies: recursive (the default), markdown, code, HTML \
+and semantic (via embeddings).
 
 ## Recursive Strategy
 
@@ -37,7 +37,7 @@ preserving document structure matters for retrieval quality.
 
 Every chunk is guaranteed to contain no more than the configured maximum number \
 of tokens. The library uses tiktoken for precise BPE token counting, supporting \
-all mainstream LLM tokenizers including GPT-4o, Claude, Llama, and DeepSeek.
+the vocabularies of GPT-4o, Llama, Qwen, DeepSeek and other open models.
 ";
 
     let chunks = chunkedrs::chunk(document).markdown().max_tokens(40).split();
@@ -55,7 +55,7 @@ all mainstream LLM tokenizers including GPT-4o, Claude, Llama, and DeepSeek.
             chunk.index, section, chunk.token_count, chunk.start_byte, chunk.end_byte,
         );
         // show first line of content as preview
-        let first_line = chunk.content.lines().next().unwrap_or("");
+        let first_line = chunk.content.trim_start().lines().next().unwrap_or("");
         let preview: String = first_line.chars().take(70).collect();
         let ellipsis = if first_line.len() > 70 { "..." } else { "" };
         println!("  \"{preview}{ellipsis}\"\n");

@@ -1,42 +1,37 @@
 [package]
 name = "chunkedrs"
-version = "2.1.1"
+version = "2.2.0"
 edition = "2024"
-description = "AI-native text chunking — recursive, markdown, code, HTML and semantic splitting with token-accurate boundaries and token spans for late chunking"
-license = "MIT"
+description = "Split text into chunks that fit a token budget, for embedding and retrieval: recursive, markdown, code, HTML and semantic strategies, exact byte ranges and document token spans"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/goliajp/rust-chunker"
-homepage = "https://github.com/goliajp/rust-chunker"
 authors = ["GOLIA株式会社", "Li Hao <lihao@golia.jp>"]
 documentation = "https://docs.rs/chunkedrs"
-keywords = ["chunking", "rag", "text-splitting", "tokenizer", "ai"]
-categories = ["text-processing"]
+keywords = ["chunking", "rag", "text-splitter", "tiktoken", "embeddings"]
+categories = ["text-processing", "algorithms"]
 readme = "README.md"
 
 [dependencies]
-# 4 is a floor, not a preference. 3.6.0 fixed a pre-tokenizer bug that split
-# canonical newline runs, and `"\n\n"` is this crate's top-priority separator —
-# every paragraph break in every document was overcounted by one token below it.
-# 3.8.0 fixed the o200k punctuation rule's missing `/` tail. 4.0.0 moved the
-# vocabularies behind features, which is what the `vocab-*` passthrough below
-# exists to forward. See tests/tokenizer_contract.rs, which pins the first two.
-# 4.1.1 is not needed by anything here — it is the floor the rest of the family
-# is on, and a shared floor keeps a `semantic` build from resolving two 4.x.
+# 3.6.0 fixed a pre-tokenizer bug that split canonical newline runs, and `"\n\n"`
+# is this crate's top-priority separator; 3.8.0 fixed the o200k punctuation
+# rule's missing `/` tail (tests/tokenizer_contract.rs pins both). 4.0.0 moved
+# the vocabularies behind features, which the `vocab-*` passthrough below
+# forwards. 5.x maps Llama 4, Qwen 3.5 and Mistral Large 4 to their own
+# vocabularies and encodes texts of 32 KiB and more on several threads.
 #
 # `vocab-o200k_base` is not optional here: it is the encoder every unrecognised
 # model name falls back to, so `resolve_encoder` can never fail to find one.
 # Everything beyond it is the caller's choice.
-tiktoken = { version = "4.1.1", default-features = false, features = [
+tiktoken = { version = "5.5", default-features = false, features = [
     "vocab-o200k_base",
 ] }
-# 0.6 is a floor for the same reason: embedrs 0.6 is the release that moved to
-# tiktoken 4.1.1, so anything older would pull a second 4.x into a build that
-# enables `semantic` alongside embedrs `cost-tracking`. 0.6 also changes the
-# Voyage default to voyage-4-large, which is a `semantic` caller's concern only
-# if it embeds with Voyage and compares against a previously built index.
+# embedrs 0.6 depends on tiktoken 4 behind its `cost-tracking` feature, so a
+# build that enables `semantic` alongside embedrs `cost-tracking` resolves
+# tiktoken 4 and 5 side by side; `semantic` alone does not.
 embedrs = { version = "0.6", optional = true }
 
 [features]
-# Vocabularies are opt-out, mirroring tiktoken 4. The default is every one of
+# Vocabularies are opt-out, mirroring tiktoken. The default is every one of
 # them, which is what a 1.x build shipped; `default-features = false` keeps
 # ~5 MB of vocabulary data you may not need out of your binary, leaving
 # o200k_base (GPT-4o / GPT-5 / o-series), which is also the fallback encoder.
@@ -64,9 +59,12 @@ vocab-o200k_base = ["tiktoken/vocab-o200k_base"]
 vocab-r50k_base = ["tiktoken/vocab-r50k_base"]
 vocab-p50k_base = ["tiktoken/vocab-p50k_base"]
 vocab-llama3 = ["tiktoken/vocab-llama3"]
+vocab-llama4 = ["tiktoken/vocab-llama4"]
 vocab-deepseek_v3 = ["tiktoken/vocab-deepseek_v3"]
 vocab-qwen2 = ["tiktoken/vocab-qwen2"]
+vocab-qwen3_5 = ["tiktoken/vocab-qwen3_5"]
 vocab-mistral_v3 = ["tiktoken/vocab-mistral_v3"]
+vocab-mistral_v15 = ["tiktoken/vocab-mistral_v15"]
 vocab-kimi_k2 = ["tiktoken/vocab-kimi_k2"]
 vocab-glm4 = ["tiktoken/vocab-glm4"]
 vocab-glm5 = ["tiktoken/vocab-glm5"]
@@ -74,6 +72,9 @@ vocab-minimax_m2 = ["tiktoken/vocab-minimax_m2"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[workspace]
+members = [".", "bench-compare"]
 
 [profile.release]
 lto = true

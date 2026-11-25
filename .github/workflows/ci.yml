@@ -27,6 +27,11 @@ jobs:
       - run: cargo build --workspace --all-targets
       - run: cargo test --workspace --all-targets
       - run: cargo test --workspace --doc
+      # keeps the comparison harness building and running; no timing
+      - run: cargo run -p bench-compare -- book
+        env:
+          QUICK: "1"
+          ENCS: o200k_base
 
   feature-matrix:
     name: vocabulary feature combinations
@@ -44,11 +49,13 @@ jobs:
         run: cargo test --no-default-features --features vocab-zhipu
       - name: one vocabulary on top of the floor
         run: cargo test --no-default-features --features vocab-cl100k_base
+      - name: a vocabulary added in tiktoken 5
+        run: cargo test --no-default-features --features vocab-qwen3_5
       - name: everything, including semantic
         run: cargo test --all-features
 
   lint:
-    name: fmt + clippy (lib strict)
+    name: fmt + clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -57,12 +64,7 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
-      # Library code is strict. Tests/examples/benches surface pre-existing
-      # cosmetic patterns (needless_borrows_for_generic_args, clone_on_copy,
-      # criterion::black_box deprecation, …) from the airs/guirs mono; we
-      # surface them as advisory only, not bundled into migration releases.
-      - run: cargo clippy --workspace --lib -- -D warnings
-      - run: cargo clippy --workspace --all-targets
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   audit:
     name: audit + deny

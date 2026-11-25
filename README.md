@@ -2,152 +2,113 @@
 
 [![Crates.io](https://img.shields.io/crates/v/chunkedrs?style=flat-square&logo=rust)](https://crates.io/crates/chunkedrs)
 [![docs.rs](https://img.shields.io/docsrs/chunkedrs?style=flat-square&logo=docs.rs)](https://docs.rs/chunkedrs)
-[![License](https://img.shields.io/crates/l/chunkedrs?style=flat-square)](LICENSE)
-[![Downloads](https://img.shields.io/crates/d/chunkedrs?style=flat-square)](https://crates.io/crates/chunkedrs)
+[![CI](https://img.shields.io/github/actions/workflow/status/goliajp/rust-chunker/ci.yml?branch=develop&style=flat-square&logo=github&label=ci)](https://github.com/goliajp/rust-chunker/actions/workflows/ci.yml)
+[![License](https://img.shields.io/crates/l/chunkedrs?style=flat-square)](#license)
 
 **English** | [简体中文](README.zh-CN.md) | [日本語](README.ja.md)
 
-Token-accurate text chunking for RAG pipelines — recursive, markdown-aware, and semantic splitting. Built on [tiktoken](https://crates.io/crates/tiktoken), the fastest pure-Rust BPE tokenizer.
+> **Upgrading from 2.1?** No API change. Chunk boundaries move, so re-chunk stored indexes: tiktoken 5 gives Llama 4, Qwen 3.5 to 3.8, Mistral Large 4 and `deepseek-flash` their own vocabularies (their token counts change), and the new planner ends some chunks at a different boundary than 2.1 did. Documents of 32 KiB and more are now encoded on several threads; `TIKTOKEN_THREADS=1` turns that off. Details: [CHANGELOG](CHANGELOG.md#upgrading-from-21).
+
+chunkedrs splits long documents into chunks that fit a token budget, for embedding and retrieval. It counts tokens with [tiktoken](https://crates.io/crates/tiktoken) (20 encodings: OpenAI, Llama, DeepSeek, Qwen, Mistral, Kimi, GLM, MiniMax) and gives every chunk its exact byte range in the source and its token range in the document's token stream. It has no dependency besides tiktoken; the `semantic` feature adds [embedrs](https://crates.io/crates/embedrs).
+
+On an Apple M4 Pro, one thread, `o200k_base`, 512 tokens per chunk: a 200 KB English book splits in 0.35 ms. text-splitter 0.33.6 takes 1.19 ms on the same tokenizer and 34.8 ms with tiktoken-rs 0.12, the tokenizer its `tiktoken-rs` feature uses.
 
 ## Highlights
 
-- **Token-accurate** — every chunk is guaranteed within your token budget, not character-approximate
-- **5 strategies** — recursive, markdown, code, HTML, and semantic (embedding-based)
-- **Token spans** — every chunk knows its range in the document's token stream, which is what [late chunking](#late-chunking) needs
-- **CJK-aware** — Chinese and Japanese split on `。`, `！`, `？` and clause marks, not on the ASCII space they do not use
-- **Section hierarchy** — a `### From source` chunk knows it lives under `## Installation` under `# Guide`
-- **Rich metadata** — byte offsets, token offsets, token counts, header ancestry
-- **Overlap** — configurable token overlap between chunks
-- **Any tokenizer** — auto-detect from model name or specify one of 17 encodings directly
-- **Built on tiktoken 4** — the fastest pure-Rust BPE tokenizer, covering 11 providers
-
-## Why chunkedrs?
-
-RAG pipelines need text split into chunks that fit model context windows. Naive splitting (by character count or fixed size) breaks mid-word, mid-sentence, or mid-paragraph — destroying meaning and hurting retrieval quality.
-
-chunkedrs splits at **semantic boundaries** (paragraphs, sentences, clauses, words) while enforcing **exact token limits**. No chunk ever exceeds `max_tokens`.
-
-### Compared to [text-splitter](https://crates.io/crates/text-splitter)
-
-Both are good at this; they aim at different defaults. text-splitter is the broader toolkit — it has tree-sitter code splitting, which chunkedrs does not.
-
-| | chunkedrs | text-splitter 0.32 |
-|---|---|---|
-| Default sizing | Tokens, always | Characters; token sizing is opt-in |
-| Tokenizer | tiktoken, built in | `tiktoken-rs` or `tokenizers`, via feature |
-| Markdown | Header ancestry as chunk metadata | CommonMark-structured splitting |
-| Code | Boundary-aware, no dependencies | **Tree-sitter, real AST** |
-| HTML | Boundary-aware, no dependencies | No |
-| Token spans (for late chunking) | Yes | No |
-| Embedding-based semantic splitting | Yes (via [embedrs](https://crates.io/crates/embedrs)) | No |
-| Byte offsets | Yes | Yes |
-| Overlap | Tokens | Follows the configured sizer |
-| Dependencies | 1 (`tiktoken`) | Grammar crate per language for code |
-
-Reach for chunkedrs when you want token accuracy without configuring it, header ancestry on every chunk, token spans for late chunking, or embedding-based breakpoints. **Reach for text-splitter when you need real AST-aware code splitting** — chunkedrs's `code()` reads punctuation, not syntax, and says so.
-
-## Strategies
-
-| Strategy | Use case | Speed |
-|----------|----------|-------|
-| **Recursive** (default) | General text — paragraphs, sentences, clauses, words | Fastest |
-| **Markdown** | Documents with headers — preserves section ancestry | Fast |
-| **Code** | Source in any language — blank lines, block closers, lines | Fast |
-| **HTML** | Web pages — block-level tag boundaries | Fast |
-| **Semantic** | High-quality RAG — splits at meaning boundaries via embeddings | Slower (API calls) |
+- **Five strategies**: recursive (paragraph, line, sentence, clause, word), markdown with header ancestry, code and HTML by boundary markers, and semantic splitting by embedding similarity.
+- **Token budget held exactly**: `token_count` is counted on the chunk's own text and is at most `max_tokens`. The one exception is a single character that alone takes more tokens than the budget.
+- **Offsets**: `&doc[start_byte..end_byte] == content` for every chunk, and `start_token..end_token` is the chunk's range in `encode(doc)`, which [late chunking](#late-chunking) needs.
+- **Chinese and Japanese**: sentences end at `。！？` and clauses at `，、；：` with no space after them; a closing quote stays with its sentence.
+- **Batches**: `Chunker` resolves the encoder once; `split_batch` spreads a slice of documents over all cores.
 
 ## Quick start
-
-Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
 chunkedrs = "2"
 ```
 
-Split text with defaults (recursive, 512 max tokens, no overlap):
-
 ```rust
-use chunkedrs::Chunk;
-
-let chunks: Vec<Chunk> = chunkedrs::chunk("your long text here...").split();
-for chunk in &chunks {
-    println!("[{}] {} tokens (bytes {}..{})", chunk.index, chunk.token_count, chunk.start_byte, chunk.end_byte);
+// recursive, 512 tokens, no overlap, o200k_base
+let chunks = chunkedrs::chunk("your long text here...").split();
+for c in &chunks {
+    println!("[{}] {} tokens, bytes {}..{}", c.index, c.token_count, c.start_byte, c.end_byte);
 }
-// Output:
-// [0] 5 tokens (bytes 0..22)
-```
 
-## Token-accurate splitting
-
-```rust
+// a model name picks the encoding
 let chunks = chunkedrs::chunk("your long text here...")
     .max_tokens(256)
-    .overlap(50)
+    .overlap(32)
     .model("gpt-5.6-terra")
     .split();
-
-// every chunk is guaranteed to have <= 256 tokens
 assert!(chunks.iter().all(|c| c.token_count <= 256));
+
+// one configuration, many documents
+let chunker = chunkedrs::Chunker::new().max_tokens(256).markdown();
+let docs = ["# A\n\nFirst.", "# B\n\nSecond."];
+let all = chunker.split_batch(&docs);
+assert_eq!(all[1][0].section(), Some("# B"));
 ```
 
-## Markdown-aware splitting
+## Performance
+
+Milliseconds per document, median of 9 rounds after warmup. Apple M4 Pro Mac mini, rustc 1.100, release with LTO, `TIKTOKEN_THREADS=1`, `o200k_base`, no overlap; load average 1.3 to 2.0 during the run, 2026-11-25. text-splitter gets the same `max_tokens` as its capacity and its defaults otherwise; its code splitter uses tree-sitter-rust 0.24.
+
+| corpus | strategy | max_tokens | one `encode` | chunkedrs | text-splitter + tiktoken 5.5 | text-splitter + tiktoken-rs 0.12 |
+|---|---|--:|--:|--:|--:|--:|
+| book_en.txt | recursive | 512 | 0.116 | **0.351** | 1.191 | 34.82 |
+| book_en.txt | recursive | 128 | 0.116 | **0.414** | 2.489 | 64.62 |
+| zh_xiyouji.md | recursive | 512 | 0.146 | **0.420** | 0.478 | 20.17 |
+| zh_xiyouji.md | markdown | 512 | 0.146 | **0.482** | 1.026 | 40.66 |
+| zh_xiyouji.md | recursive | 128 | 0.157 | **0.532** | 1.441 | 30.67 |
+| zh_xiyouji.md | markdown | 128 | 0.157 | **0.628** | 1.959 | 43.74 |
+| md_rust_book.md | recursive | 512 | 0.100 | **0.306** | 0.738 | 22.32 |
+| md_rust_book.md | markdown | 512 | 0.100 | **0.401** | 1.191 | 25.26 |
+| md_rust_book.md | recursive | 128 | 0.099 | **0.368** | 0.938 | 21.78 |
+| md_rust_book.md | markdown | 128 | 0.099 | **0.503** | 1.779 | 33.41 |
+| code_rust.txt | recursive | 512 | 0.060 | **0.199** | 0.323 | 11.69 |
+| code_rust.txt | code | 512 | 0.060 | **0.207** | 6.633 | 34.28 |
+| code_rust.txt | recursive | 128 | 0.060 | **0.243** | 0.525 | 15.08 |
+| code_rust.txt | code | 128 | 0.060 | **0.280** | 7.745 | 61.49 |
+
+`book_en.txt` is 200,000 bytes of *Pride and Prejudice*, `zh_xiyouji.md` 178,622 bytes of *Journey to the West* chapters 1-9 in markdown (Wikisource), `md_rust_book.md` 174,237 bytes of *The Rust Programming Language* chapters 3-6, `code_rust.txt` 100,000 bytes of Rust source. All are in [`bench-compare/data`](bench-compare/data).
+
+- Every chunk of every row above was recounted with tiktoken: none is over budget, for chunkedrs or text-splitter.
+- chunkedrs takes 2.9 to 5.1 times one `encode` of the document. The document is encoded once (one `encode`), each token's byte length is looked up (about half an `encode`), and each chunk is counted once on its own (about one more `encode`, because BPE does not add up across a cut); finding boundaries and building chunks is the rest.
+- `cl100k_base` gives the same picture (0.19 to 0.72 ms for chunkedrs). With tiktoken's default threads, the whole-document encode of these 100 to 200 KB texts runs on several threads and chunkedrs takes 0.17 to 0.45 ms.
+- `Chunker::split_batch` on 64 documents (the four corpora 16 times, 10.4 MB): 28.2 ms one after another, 3.9 ms as a batch.
+
+Reproduce with `TIKTOKEN_THREADS=1 cargo run --release -p bench-compare`.
+
+## How it splits
+
+The document is encoded once. From the start of a chunk, the byte offset after `max_tokens` document tokens bounds where the chunk can end. Inside that window the chunk ends at the last boundary of the highest-priority kind present:
+
+| Strategy | Boundaries, highest priority first |
+|---|---|
+| recursive (default) | blank line; line break; `. ! ?` followed by a space, `。！？．｡…‥`; `; , :` and `；，、：･`; space, tab, ideographic space |
+| `markdown()` | header lines first (ATX `#` and setext `===` / `---`, not inside fenced code or front matter), then the recursive boundaries inside each section |
+| `code()` | blank line; `}` `};` `)` `]` `];` `end` alone on a line at column 0; line break; space, tab |
+| `html()` | after a block-level closing tag (`</p>`, `</li>`, `</section>`, `</h1>`, ...), then the recursive boundaries |
+| `semantic()` | between sentence groups whose embeddings fall below the similarity threshold, then the recursive boundaries |
+
+When no boundary falls inside the window, the chunk ends at a token boundary, moved back to a character boundary. The chosen text is then counted on its own: BPE merges across a cut, so a slice can take one token more or less than its share of the document's tokens. In the rare case it is over budget, the window shrinks and the chunk is chosen again.
+
+Code and HTML splitting read punctuation and tags, not syntax: they parse nothing and add no dependency, and a `}` inside a string literal looks like a block close to them. For syntax-aware code splitting, use text-splitter's tree-sitter `CodeSplitter`.
+
+## Markdown
 
 ```rust
-let markdown = "# Guide\n\nIntro.\n\n## Install\n\nRun cargo add.\n";
-let chunks = chunkedrs::chunk(markdown).markdown().split();
+let md = "# Guide\n\nIntro.\n\n## Install\n\nRun cargo add.\n";
+let chunks = chunkedrs::chunk(md).markdown().split();
 
-// each chunk knows the section it belongs to...
 assert_eq!(chunks[0].section(), Some("# Guide"));
-
-// ...and its full ancestry, so nested sections keep their context
 assert_eq!(chunks[1].section_path, ["# Guide", "## Install"]);
 ```
 
-Headers are ATX (`#`) or setext (`===` / `---`). Fenced code blocks are skipped, so a `#` comment inside a `bash` block is a comment; YAML and TOML front matter is excluded from header detection.
+Header lines go into `section_path`, not into `content`, so joining every chunk's content does not reproduce them.
 
-## Code and HTML
-
-```rust
-let src = "fn a() {\n    one();\n}\n\nfn b() {\n    two();\n}\n";
-let chunks = chunkedrs::chunk(src).code().max_tokens(20).split();
-
-let page = "<h1>Title</h1><p>First para.</p><p>Second para.</p>";
-let chunks = chunkedrs::chunk(page).html().max_tokens(10).split();
-```
-
-Both are **boundary-aware, not AST-aware**. `code()` splits on blank lines, then on brackets closing a block at column 0, then on lines — and deliberately skips the prose separators, because splitting code on `". "` cuts inside string literals. `html()` scans for block-level closing tags (`</p>`, `</li>`, `</section>`, …) case-insensitively and degrades to the text ladder on malformed markup.
-
-Neither parses anything. That is the tradeoff: they work on any language and any markup and add no dependencies, but a `}` inside a string literal looks like a block close. When you need AST fidelity, use a tree-sitter based splitter such as [text-splitter](https://crates.io/crates/text-splitter)'s `CodeSplitter`.
-
-## Late chunking
-
-Embedding each chunk in isolation loses the surrounding context — a chunk that says "it costs $40" no longer knows what "it" was. [Late chunking](https://arxiv.org/abs/2409.04701) inverts the order: embed the whole document once, then pool each chunk's vector over its own slice of the token stream.
-
-The slice is the part chunkedrs supplies:
-
-```rust
-let doc = "First sentence here. Second sentence here. Third sentence here.";
-let chunks = chunkedrs::chunk(doc).max_tokens(8).split();
-
-let encoder = tiktoken::get_encoding("o200k_base").unwrap();
-let document_tokens = encoder.encode(doc);
-
-for chunk in &chunks {
-    // in a real pipeline this indexes the encoder's per-token hidden states
-    let span = &document_tokens[chunk.start_token..chunk.end_token];
-    assert!(!span.is_empty());
-}
-```
-
-No re-tokenizing, no guessing where a chunk landed. See [`examples/token_spans.rs`](examples/token_spans.rs).
-
-## CJK text
-
-Chinese and Japanese do not put a space after a sentence mark, so a splitter
-whose separators all end in an ASCII space finds no boundary at all and cuts
-mid-word. chunkedrs splits on the marks these scripts actually use, and keeps
-closing quotes with the sentence they close:
+## Chinese and Japanese
 
 ```rust
 let zh = "他说「今天天气很好。」然后就出门了。她回答说「确实不错。」于是也跟着出去了。";
@@ -157,15 +118,30 @@ assert_eq!(chunks[0].content, "他说「今天天气很好。」");
 assert_eq!(chunks[1].content, "然后就出门了。");
 ```
 
-When a whole sentence will not fit, the clause marks (`，`、`、`、`；`) are the
-next boundary down, and only then does it fall back to token offsets.
+A splitter whose separators all end in an ASCII space finds no sentence boundary in this text and cuts inside a word.
+
+## Late chunking
+
+[Late chunking](https://arxiv.org/abs/2409.04701) embeds the whole document once and pools each chunk's vector over the chunk's own tokens. `start_token..end_token` is that range in `encode(doc)`:
+
+```rust
+let doc = "First sentence here. Second sentence here. Third sentence here.";
+let chunks = chunkedrs::chunk(doc).max_tokens(8).split();
+
+let encoder = tiktoken::get_encoding("o200k_base").unwrap();
+let document_tokens = encoder.encode(doc);
+for chunk in &chunks {
+    // in a real pipeline this indexes the model's per-token hidden states
+    let span = &document_tokens[chunk.start_token..chunk.end_token];
+    assert!(!span.is_empty());
+}
+```
+
+Where a boundary falls inside a token (`". "` before a word, where the tokenizer joins the space to the word), the span covers that token, so two consecutive spans can share one token. `token_count` can therefore differ from `end_token - start_token`. See [`examples/token_spans.rs`](examples/token_spans.rs).
 
 ## Semantic splitting
 
-With the `semantic` feature enabled, split at meaning boundaries using embeddings:
-
 ```toml
-[dependencies]
 chunkedrs = { version = "2", features = ["semantic"] }
 ```
 
@@ -178,130 +154,72 @@ let chunks = chunkedrs::chunk("your long text here...")
     .await?;
 ```
 
-`.semantic()` returns a builder with no `.split()` at all — semantic splitting makes network calls, so the synchronous method does not exist to be called by mistake.
+Sentences are embedded in batches of the provider's request limit. `.semantic()` returns a builder that has only `split_async()`, so the network call cannot be made from a synchronous `split()` by mistake.
 
-## Chunk metadata
+## Chunk
 
 ```rust
 #[non_exhaustive]
 pub struct Chunk {
-    pub content: String,           // the text
-    pub index: usize,              // position in sequence
-    pub start_byte: usize,         // byte offset in original text
-    pub end_byte: usize,           // byte offset (exclusive)
-    pub start_token: usize,        // token offset in the document's token stream
-    pub end_token: usize,          // token offset (exclusive)
-    pub token_count: usize,        // tokens in this chunk, counted on its own
-    pub section_path: Vec<String>, // header ancestry, outermost first
-}
-
-impl Chunk {
-    pub fn section(&self) -> Option<&str>;  // the deepest header
+    pub content: String,           // the text, equal to &doc[start_byte..end_byte]
+    pub index: usize,              // position in the sequence
+    pub start_byte: usize,
+    pub end_byte: usize,           // exclusive
+    pub start_token: usize,        // range in encode(doc)
+    pub end_token: usize,          // exclusive
+    pub token_count: usize,        // tokens of content counted on its own
+    pub section_path: Vec<String>, // markdown header ancestry, outermost first
 }
 ```
 
-`token_count` and `end_token - start_token` answer different questions and may differ. `token_count` is a fresh count of the chunk alone — what `max_tokens` bounds and what you budget a context window against. The span is the chunk's footprint in the document stream; where a separator sits inside a token, it widens to cover it, so consecutive spans can share one token.
+Chunks that contain only whitespace are dropped. `Chunk` is `#[non_exhaustive]`; build one by hand with `Chunk::new(..).with_bytes(..).with_tokens(..)`.
 
-`Chunk` is `#[non_exhaustive]`, so future metadata will not be another major version. Build one with `Chunk::new(...).with_bytes(..).with_tokens(..)`.
+Overlap (`.overlap(n)`) starts each chunk about `n` tokens before the previous one ended, at a character boundary, and is off by default. Whether it helps retrieval depends on the workload; measure before you turn it on.
 
-## Overlap
+## Encodings and features
 
-Token overlap between consecutive chunks carries context across boundaries:
+`.model("...")` resolves model names across OpenAI, Meta, DeepSeek, Qwen, Mistral, Moonshot, Zhipu and MiniMax; `.encoding("cl100k_base")` names an encoding directly and wins over `.model()`. An unknown name falls back to `o200k_base` without an error. Anthropic and Google publish no tiktoken-compatible vocabulary, so `claude-*` and `gemini-*` take that fallback, which approximates their counts.
 
-```rust
-let chunks = chunkedrs::chunk("your long text here...")
-    .max_tokens(256)
-    .overlap(50)
-    .split();
-```
-
-Whether overlap helps is workload-dependent — recent retrieval evaluations
-report little measurable benefit against a real cost in index size. It is off
-by default; measure before turning it on.
-
-## Tokenizer selection
-
-```rust
-// auto-detect from model name
-let chunks = chunkedrs::chunk(text).model("gpt-5.6-terra").split();
-
-// or specify one of the 17 encodings directly
-let chunks = chunkedrs::chunk(text).encoding("cl100k_base").split();
-
-// default: o200k_base (GPT-4o, GPT-5, o-series)
-```
-
-Model names resolve across OpenAI, Meta (`llama-3.1-70b`), DeepSeek
-(`deepseek-v4`), Alibaba (`qwen2.5-72b`), Mistral, Moonshot (`kimi-k2`), Zhipu
-(`glm-5`) and MiniMax (`minimax-m2`).
-
-## Vocabulary features
-
-Tokenizer vocabularies are the bulk of the compiled size, and most builds use
-one. They are opt-out: the default carries all 17 encodings, and
-`default-features = false` keeps only `o200k_base` — the encoder every
-unresolved name falls back to, so it is never absent.
+Vocabularies are opt-out features, as in tiktoken. The default compiles in all 20 encodings; `default-features = false` keeps only `o200k_base`, the fallback encoder.
 
 ```toml
-# everything (default)
-chunkedrs = "2"
-
-# o200k_base only — GPT-4o, GPT-5, o-series
-chunkedrs = { version = "2", default-features = false }
-
-# o200k_base plus the Zhipu family
-chunkedrs = { version = "2", default-features = false, features = ["vocab-zhipu"] }
+chunkedrs = "2"                                                   # all vocabularies
+chunkedrs = { version = "2", default-features = false }           # o200k_base only
+chunkedrs = { version = "2", default-features = false, features = ["vocab-qwen"] }
 ```
 
-Measured on `examples/basic`, release build:
+`examples/basic`, release build on macOS arm64: 9,189,376 bytes with all vocabularies, 2,072,256 bytes with `default-features = false` (77% smaller).
 
-| | size |
-|---|---:|
-| all vocabularies (default) | 7,100,544 |
-| `default-features = false` | 2,695,104 |
-| | **−62%** |
+Vendor groups: `vocab-openai`, `vocab-meta`, `vocab-deepseek`, `vocab-qwen`, `vocab-mistral`, `vocab-moonshot`, `vocab-zhipu`, `vocab-minimax`. Single vocabularies: `vocab-cl100k_base`, `vocab-llama4`, `vocab-qwen3_5`, `vocab-mistral_v15`, `vocab-glm5` and the rest of tiktoken's list. A vocabulary that is not compiled in resolves like an unknown name, to `o200k_base`, so check that the encodings you name are enabled.
 
-Vendor groups: `vocab-openai`, `vocab-meta`, `vocab-deepseek`, `vocab-qwen`,
-`vocab-mistral`, `vocab-moonshot`, `vocab-zhipu`, `vocab-minimax`. Individual
-vocabularies: `vocab-cl100k_base`, `vocab-llama3`, `vocab-glm5`, and so on.
+## Compared with text-splitter
 
-**One sharp edge.** Asking for a vocabulary this build did not compile in is
-indistinguishable from a typo — both fall back to `o200k_base` silently, so you
-get plausible counts for the wrong tokenizer. If you slim the build, check that
-the encodings you name are ones you enabled.
+| | chunkedrs | text-splitter 0.33 |
+|---|---|---|
+| Size unit | tokens (tiktoken) | characters by default; tokens through tiktoken-rs, tokenizers or your own `ChunkSizer` |
+| Markdown | header ancestry on every chunk | CommonMark structure (pulldown-cmark) |
+| Code | boundary markers, any language, no dependency | tree-sitter grammar per language |
+| HTML | yes | no |
+| Token spans in the document | yes | no |
+| Embedding-based splitting | yes (`semantic`) | no |
+| Capacity range (`min..max`), trimming | no | yes |
+| Unicode segmentation (graphemes, words, sentences via ICU) | no | yes |
 
-Anthropic and Google do not publish tiktoken-compatible vocabularies, so
-`claude-*` and `gemini-*` do **not** resolve — an unrecognised name falls back
-to `o200k_base`, which is an approximation rather than an exact count. Use
-`.encoding()` if you need to pin that behaviour explicitly.
+## Build
 
-## Upgrading from 1.x
-
-Two mechanical renames and one behaviour note.
-
-```rust
-// 1.x
-chunk.section.as_deref()          // Option<&str>
-Chunk { content, index, .. }      // struct literal
-
-// 2.0
-chunk.section()                   // Option<&str> — same value, now a method
-chunk.section_path                // Vec<String> — the full ancestry
-Chunk::new(content).with_index(i) // Chunk is #[non_exhaustive]
+```bash
+cargo test --workspace --all-targets
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+CHUNKEDRS_PROPTEST_CASES=5000 cargo test --test properties   # longer property run
+cargo run --release -p bench-compare                          # the tables above
 ```
 
-`.semantic(&client)` now returns a `SemanticChunkBuilder`. If you were calling `.split()` on it, that was a runtime panic; it is now a compile error, and `.split_async()` is what you want.
+## Related crates
 
-Chunk boundaries move relative to 1.0.x — see the [CHANGELOG](CHANGELOG.md) for why. Re-chunk and re-embed; byte offsets remain exact against the source.
-
-<!-- ECOSYSTEM BEGIN (generated — edit ecosystem.toml, not this block) -->
-
-## Ecosystem
-
-[tiktoken](https://crates.io/crates/tiktoken) · [@goliapkg/tiktoken-wasm](https://www.npmjs.com/package/@goliapkg/tiktoken-wasm) · [instructors](https://crates.io/crates/instructors) · **chunkedrs** · [embedrs](https://crates.io/crates/embedrs)
-
-<!-- ECOSYSTEM END -->
+[tiktoken](https://crates.io/crates/tiktoken) · [@goliapkg/tiktoken-wasm](https://www.npmjs.com/package/@goliapkg/tiktoken-wasm) · [instructors](https://crates.io/crates/instructors) · [embedrs](https://crates.io/crates/embedrs)
 
 ## License
 
-MIT
+Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
+
+The vocabularies compiled in through tiktoken's `vocab-*` features keep their publishers' licenses, some with conditions on use (Llama, Mistral, DeepSeek, Kimi, MiniMax). tiktoken's [LICENSE-3RD-PARTY](https://github.com/goliajp/rust-tiktoken/blob/develop/tiktoken/LICENSE-3RD-PARTY) lists them; a build without a vocabulary's feature does not contain that vocabulary.

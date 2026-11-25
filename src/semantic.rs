@@ -1,6 +1,6 @@
 use crate::Chunk;
-use crate::recursive::split_recursive;
-use tiktoken::CoreBpe;
+use crate::plan::{Doc, plan, tiers};
+use crate::recursive::{TEXT_TIERS, split_recursive};
 
 /// split text at semantic boundaries using embedding similarity.
 ///
@@ -12,56 +12,68 @@ use tiktoken::CoreBpe;
 /// 5. merge sentences between breakpoints into chunks
 /// 6. if a chunk exceeds max_tokens, apply recursive splitting
 pub(crate) async fn split_semantic(
-    text: &str,
+    doc: &Doc<'_>,
     max_tokens: usize,
     overlap_tokens: usize,
-    encoder: &CoreBpe,
     client: &embedrs::Client,
     threshold: f64,
 ) -> Result<Vec<Chunk>, crate::Error> {
-    if text.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let sentences = split_sentences(text);
+    let sentences = split_sentences(doc.text);
     if sentences.len() <= 1 {
-        let chunks = split_recursive(text, 0, max_tokens, overlap_tokens, encoder, &[]);
-        return Ok(chunks);
+        return Ok(split_recursive(doc, max_tokens, overlap_tokens));
     }
 
-    // embed all sentences
+    // `embed` sends one request and fails on more inputs than the provider
+    // takes in one call; `embed_batch` splits by the provider's batch size
     let sentence_texts: Vec<String> = sentences.iter().map(|s| s.text.to_string()).collect();
     let embed_result = client
-        .embed(sentence_texts)
+        .embed_batch(sentence_texts)
         .await
         .map_err(crate::Error::Embed)?;
 
     // find breakpoints by cosine similarity between consecutive sentences
     let breakpoints = find_breakpoints(&embed_result.embeddings, threshold);
 
-    // merge sentences into groups at breakpoints
-    let groups = merge_at_breakpoints(&sentences, &breakpoints);
+    Ok(split_groups(
+        doc,
+        &sentences,
+        &breakpoints,
+        max_tokens,
+        overlap_tokens,
+    ))
+}
 
-    let mut all_chunks = Vec::new();
-    for group in &groups {
-        let content: String = group.iter().map(|s| s.text).collect::<Vec<_>>().join("");
-        let group_offset = group.first().map(|s| s.byte_offset).unwrap_or(0);
-        let sub_chunks = split_recursive(
-            &content,
-            group_offset,
+/// Chunk each group of sentences as one slice of the source.
+///
+/// A group is the source text from its first sentence to its last, so
+/// whitespace-only sentences that were left out of the embedding stay inside
+/// it and every chunk's byte range still addresses `text`.
+fn split_groups(
+    doc: &Doc<'_>,
+    sentences: &[Sentence<'_>],
+    breakpoints: &[usize],
+    max_tokens: usize,
+    overlap_tokens: usize,
+) -> Vec<Chunk> {
+    let ladder = tiers(TEXT_TIERS);
+    let mut chunks = Vec::new();
+    for group in merge_at_breakpoints(sentences, breakpoints) {
+        let (Some(first), Some(last)) = (group.first(), group.last()) else {
+            continue;
+        };
+        let end = last.byte_offset + last.text.len();
+        for piece in plan(
+            doc,
+            first.byte_offset,
+            end,
+            &ladder,
             max_tokens,
             overlap_tokens,
-            encoder,
-            &[],
-        );
-        all_chunks.extend(sub_chunks);
+        ) {
+            chunks.push(doc.chunk(piece, &[]));
+        }
     }
-
-    for (i, chunk) in all_chunks.iter_mut().enumerate() {
-        chunk.index = i;
-    }
-
-    Ok(all_chunks)
+    chunks
 }
 
 struct Sentence<'a> {
@@ -111,9 +123,8 @@ fn find_breakpoints(embeddings: &[Vec<f32>], threshold: f64) -> Vec<usize> {
 
 /// Cosine similarity, delegated to `embedrs`.
 ///
-/// embedrs 0.4 rewrote this with 8-lane independent accumulators so LLVM
-/// autovectorizes it at `-C opt-level=3`; re-implementing it here would be
-/// both slower and a second thing to keep correct.
+/// embedrs's version is written so LLVM vectorizes it; a copy here would be a
+/// second thing to keep correct.
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
     embedrs::similarity::cosine_similarity(a, b) as f64
 }
@@ -270,6 +281,22 @@ mod tests {
         // must not panic on Japanese multi-byte characters
         let sentences = split_sentences("最初の文です。次の文です。最後。");
         assert!(!sentences.is_empty());
+    }
+
+    #[test]
+    fn groups_keep_offsets_when_a_blank_sentence_is_left_out() {
+        let enc = tiktoken::get_encoding("o200k_base").unwrap();
+        let text = "Alpha one.\n \nBravo two. Charlie three.\n\t\nDelta four.";
+        let sentences = split_sentences(text);
+        // break before every sentence, and before none
+        let all: Vec<usize> = (1..sentences.len()).collect();
+        for breakpoints in [all, Vec::new()] {
+            let chunks = split_groups(&Doc::new(text, enc), &sentences, &breakpoints, 512, 0);
+            assert!(!chunks.is_empty());
+            for c in &chunks {
+                assert_eq!(&text[c.start_byte..c.end_byte], c.content);
+            }
+        }
     }
 
     #[test]

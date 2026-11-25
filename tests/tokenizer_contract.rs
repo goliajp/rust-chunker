@@ -103,6 +103,25 @@ fn advertised_models_resolve() {
     }
 }
 
+/// Models that tiktoken 5.0 moved to vocabularies of their own. Chunk
+/// boundaries for these changed with the 5.x upgrade, so the mapping is pinned.
+#[test]
+fn models_remapped_in_tiktoken_5() {
+    for (model, encoding) in [
+        ("llama-4-maverick", "llama4"),
+        ("qwen3.5-plus", "qwen3_5"),
+        ("mistral-large-latest", "mistral_v15"),
+        ("deepseek-flash", "deepseek_v4"),
+        ("gpt-6", "o200k_base"),
+    ] {
+        assert_eq!(
+            tiktoken::model_to_encoding(model),
+            Some(encoding),
+            "model '{model}'"
+        );
+    }
+}
+
 /// Encodings the crate exposes by name must all be reachable.
 ///
 /// As of tiktoken 4 `list_encodings()` reports only the vocabularies compiled
@@ -122,10 +141,16 @@ fn advertised_encodings_resolve() {
 #[cfg(feature = "vocabs-all")]
 fn full_catalogue_is_present() {
     assert!(
-        tiktoken::list_encodings().len() >= 17,
-        "expected the 2026-08 encoding catalogue (17+), got {}",
-        tiktoken::list_encodings().len()
+        tiktoken::list_encodings().len() >= 20,
+        "expected the tiktoken 5 encoding catalogue (20+), got {:?}",
+        tiktoken::list_encodings()
     );
+    for name in ["llama4", "qwen3_5", "mistral_v15"] {
+        assert!(
+            tiktoken::get_encoding(name).is_some(),
+            "{name} must be compiled in"
+        );
+    }
 }
 
 /// `o200k_base` is the encoder every unresolved name falls back to, so it must
