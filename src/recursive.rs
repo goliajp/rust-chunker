@@ -241,6 +241,8 @@ pub(crate) fn merge_pieces(
     let mut piece_end = 0usize;
     // false while `current` holds only overlap carried from the previous chunk
     let mut fresh = false;
+    // pieces (or overlap) in `current`; with one, `current_tokens` is exact
+    let mut parts = 0usize;
 
     for piece in pieces {
         let piece_tokens = encoder.count(piece);
@@ -253,12 +255,14 @@ pub(crate) fn merge_pieces(
                 chunks.push(make_chunk(
                     &current,
                     text_offset + current_start,
+                    (parts == 1).then_some(current_tokens),
                     encoder,
                     section_path,
                 ));
             }
             current.clear();
             current_tokens = 0;
+            parts = 0;
             fresh = false;
 
             let sub_chunks = descend(piece, text_offset + piece_offset, ctx, next_tier);
@@ -272,11 +276,13 @@ pub(crate) fn merge_pieces(
         if current_tokens + piece_tokens > max_tokens && !fresh {
             current.clear();
             current_tokens = 0;
+            parts = 0;
         }
         if current_tokens + piece_tokens > max_tokens && !current.is_empty() {
             chunks.push(make_chunk(
                 &current,
                 text_offset + current_start,
+                (parts == 1).then_some(current_tokens),
                 encoder,
                 section_path,
             ));
@@ -289,10 +295,10 @@ pub(crate) fn merge_pieces(
             };
 
             current = overlap_text;
-            current_tokens = if current.is_empty() {
-                0
+            (current_tokens, parts) = if current.is_empty() {
+                (0, 0)
             } else {
-                encoder.count(&current)
+                (encoder.count(&current), 1)
             };
             current_start = piece_end - current.len();
         }
@@ -302,6 +308,7 @@ pub(crate) fn merge_pieces(
         }
         current.push_str(piece);
         current_tokens += piece_tokens;
+        parts += 1;
         piece_end = piece_offset + piece.len();
         fresh = true;
     }
@@ -311,6 +318,7 @@ pub(crate) fn merge_pieces(
         chunks.push(make_chunk(
             &current,
             text_offset + current_start,
+            (parts == 1).then_some(current_tokens),
             encoder,
             section_path,
         ));
@@ -456,9 +464,11 @@ fn floor_char_boundary(text: &str, i: usize) -> usize {
     i
 }
 
+/// `known` is the token count when the caller already has it exactly.
 fn make_chunk(
     content: &str,
     start_byte: usize,
+    known: Option<usize>,
     encoder: &CoreBpe,
     section_path: &[String],
 ) -> Chunk {
@@ -469,7 +479,7 @@ fn make_chunk(
         end_byte: start_byte + content.len(),
         start_token: 0,
         end_token: 0,
-        token_count: encoder.count(content),
+        token_count: known.unwrap_or_else(|| encoder.count(content)),
         section_path: section_path.to_vec(),
     }
 }
