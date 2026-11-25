@@ -44,6 +44,8 @@ jobs:
         run: cargo test --no-default-features --features vocab-zhipu
       - name: one vocabulary on top of the floor
         run: cargo test --no-default-features --features vocab-cl100k_base
+      - name: a vocabulary added in tiktoken 5
+        run: cargo test --no-default-features --features vocab-qwen3_5
       - name: everything, including semantic
         run: cargo test --all-features
 
