@@ -111,14 +111,25 @@ pub(crate) fn split_at_any<'a>(text: &'a str, seps: &[&str]) -> Vec<&'a str> {
 
 /// Extend `from` over any run of closing marks and horizontal whitespace, so
 /// they stay with the sentence they belong to rather than opening the next one.
+#[inline]
 pub(crate) fn absorb_trailing(text: &str, from: usize) -> usize {
+    let bytes = text.as_bytes();
     let mut end = from;
-    while let Some(c) = text[end..].chars().next() {
-        if TRAILING_ABSORB.contains(&c) {
-            end += c.len_utf8();
-        } else {
+    while let Some(&b) = bytes.get(end) {
+        let len = match b {
+            // the ASCII members of TRAILING_ABSORB
+            b' ' | b'\t' | b'"' | b'\'' | b')' | b']' | b'}' | b'>' => 1,
+            // every other member is a three-byte character starting with one of these
+            0xE2 | 0xE3 | 0xEF => match text[end..].chars().next() {
+                Some(c) if TRAILING_ABSORB.contains(&c) => 3,
+                _ => 0,
+            },
+            _ => 0,
+        };
+        if len == 0 {
             break;
         }
+        end += len;
     }
     end
 }
@@ -239,6 +250,27 @@ mod tests {
                     "{text:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn absorb_fast_path_covers_every_mark() {
+        for &c in TRAILING_ABSORB {
+            let len = c.len_utf8();
+            let text = format!("{c}x");
+            assert_eq!(absorb_trailing(&text, 0), len, "{c:?}");
+        }
+        for c in (0u32..0x3100)
+            .chain(0xFF00..0xFFF0)
+            .filter_map(char::from_u32)
+        {
+            let text = format!("{c}x");
+            let want = if TRAILING_ABSORB.contains(&c) {
+                c.len_utf8()
+            } else {
+                0
+            };
+            assert_eq!(absorb_trailing(&text, 0), want, "{c:?}");
         }
     }
 
