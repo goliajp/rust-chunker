@@ -23,7 +23,7 @@ readme = "README.md"
 # `vocab-o200k_base` is not optional here: it is the encoder every unrecognised
 # model name falls back to, so `resolve_encoder` can never fail to find one.
 # Everything beyond it is the caller's choice.
-tiktoken = { version = "5.4", default-features = false, features = [
+tiktoken = { version = "5.5", default-features = false, features = [
     "vocab-o200k_base",
 ] }
 # embedrs 0.6 depends on tiktoken 4 behind its `cost-tracking` feature, so a
