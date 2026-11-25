@@ -127,11 +127,11 @@ struct Planner<'d> {
 
 impl Planner<'_> {
     /// The highest-priority cut in `(floor, lim]`, the latest of its tier.
-    fn best_cut(&mut self, floor: usize, lim: usize) -> Option<usize> {
+    fn best_cut(&mut self, s: usize, floor: usize, lim: usize) -> Option<usize> {
         let (text, hi) = (self.doc.text, self.hi);
         self.scans
             .iter_mut()
-            .find_map(|scan| scan.last_in(text, hi, floor, lim))
+            .find_map(|scan| scan.last_in(text, hi, s, floor, lim))
     }
 
     /// End and token count of the chunk starting at `s` that must end after
@@ -146,7 +146,7 @@ impl Planner<'_> {
             let e = if lim >= self.hi {
                 self.hi
             } else {
-                self.best_cut(floor, lim).unwrap_or_else(|| {
+                self.best_cut(s, floor, lim).unwrap_or_else(|| {
                     let e = floor_char_boundary(text, lim);
                     if e <= floor { one } else { e }
                 })

@@ -80,10 +80,22 @@ impl Scan {
     /// The last cut in `(floor, lim]` of the range `..hi` of `text`: the end
     /// of a piece `split_at_any` would produce on the range, separator and
     /// trailing closers included.
-    pub fn last_in(&mut self, text: &str, hi: usize, floor: usize, lim: usize) -> Option<usize> {
+    ///
+    /// `from` is the start of the chunk being planned. A tier that has not
+    /// been scanned that far starts there: the chunk start is itself a cut,
+    /// and the bytes before it are never asked about again.
+    pub fn last_in(
+        &mut self,
+        text: &str,
+        hi: usize,
+        from: usize,
+        floor: usize,
+        lim: usize,
+    ) -> Option<usize> {
         let cuts = match self {
             Scan::Fixed(cuts) => cuts,
             Scan::Seps { matcher, cuts, pos } => {
+                *pos = (*pos).max(from);
                 if *pos < lim {
                     *pos = extend(matcher, &text[..hi], *pos, lim, cuts);
                 }
@@ -187,7 +199,7 @@ mod tests {
                 let mut scan = Scan::seps(tier, 0);
                 let mut got = Vec::new();
                 for lim in 1..=text.len() {
-                    if let Some(c) = scan.last_in(&text, text.len(), 0, lim)
+                    if let Some(c) = scan.last_in(&text, text.len(), 0, 0, lim)
                         && got.last() != Some(&c)
                     {
                         got.push(c);
@@ -206,7 +218,7 @@ mod tests {
             for floor in 0..lim {
                 let want = ends.iter().copied().rfind(|&e| e <= lim && e > floor);
                 let mut scan = Scan::seps(TEXT_TIERS[2], 0);
-                assert_eq!(scan.last_in(text, text.len(), floor, lim), want);
+                assert_eq!(scan.last_in(text, text.len(), 0, floor, lim), want);
             }
         }
     }
