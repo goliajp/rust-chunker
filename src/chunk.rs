@@ -1,6 +1,6 @@
 /// A piece of text produced by splitting a larger document.
 ///
-/// Every chunk knows where it came from — byte offsets *and* token offsets into
+/// Every chunk knows where it came from: byte offsets *and* token offsets into
 /// the original text, its position in the sequence, and its own token count.
 /// This metadata enables accurate citation, deduplication, context-window
 /// budgeting, and late chunking.
@@ -10,7 +10,7 @@
 /// `start_byte..end_byte` addresses the source text: slicing the original
 /// document with that range reproduces `content` exactly.
 ///
-/// `start_token..end_token` addresses the document's *token stream* — the range
+/// `start_token..end_token` addresses the document's *token stream*, the range
 /// of `encoder.encode(whole_document)` that covers this chunk. That is what
 /// [late chunking] needs: embed the document once, then mean-pool each chunk's
 /// vector over its own token range, so every chunk embedding carries the
@@ -18,7 +18,7 @@
 ///
 /// # `token_count` is not `end_token - start_token`
 ///
-/// `token_count` is a fresh count of `content` on its own — the number you
+/// `token_count` is a fresh count of `content` on its own: the number you
 /// budget a context window against, and the number `max_tokens` bounds. The
 /// span width is this chunk's footprint in the document stream. BPE merges
 /// across boundaries, so re-tokenizing a fragment in isolation does not always
@@ -66,7 +66,7 @@ pub struct Chunk {
     /// Number of tokens in `content`, counted on its own.
     pub token_count: usize,
 
-    /// Header ancestry from the markdown strategy, outermost first — e.g.
+    /// Header ancestry from the markdown strategy, outermost first, e.g.
     /// `["# Guide", "## Installation", "### From source"]`.
     ///
     /// Empty for content before the first header and for every non-markdown
@@ -77,9 +77,9 @@ pub struct Chunk {
 impl Chunk {
     /// Start an empty chunk carrying `content`.
     ///
-    /// `Chunk` is `#[non_exhaustive]`, so downstream crates cannot build one
-    /// with a struct literal — new metadata can be added without a major
-    /// version. This constructor and the `with_*` methods are the way to make
+    /// `Chunk` is `#[non_exhaustive]`: new metadata can be added without a
+    /// major version, and downstream crates cannot build one with a struct
+    /// literal. This constructor and the `with_*` methods are the way to make
     /// one by hand, for tests and for adapters that re-materialise chunks from
     /// storage.
     ///
