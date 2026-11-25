@@ -27,7 +27,7 @@ pub fn chunk(text: &str) -> ChunkBuilder<'_> {
 
 /// Strategy for splitting text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Strategy {
+pub(crate) enum Strategy {
     Recursive,
     Markdown,
     Code,
@@ -222,35 +222,52 @@ impl<'a> ChunkBuilder<'a> {
     /// assert_eq!(chunks[0].content, "hello world");
     /// ```
     pub fn split(self) -> Vec<Chunk> {
-        let doc = crate::plan::Doc::new(self.text, self.resolve_encoder());
-        let (max, overlap) = (self.max_tokens, self.overlap);
-        let mut chunks = match self.strategy {
-            Strategy::Recursive => crate::recursive::split_recursive(&doc, max, overlap),
-            Strategy::Markdown => crate::markdown::split_markdown(&doc, max, overlap),
-            Strategy::Code => crate::code::split_code(&doc, max, overlap),
-            Strategy::Html => crate::html::split_html(&doc, max, overlap),
-        };
-        crate::finish(&mut chunks);
-        chunks
+        run(
+            self.text,
+            self.resolve_encoder(),
+            self.strategy,
+            self.max_tokens,
+            self.overlap,
+        )
     }
 
     fn resolve_encoder(&self) -> &'static tiktoken::CoreBpe {
-        let default = || tiktoken::get_encoding("o200k_base").expect("o200k_base encoding");
-
-        // encoding name takes precedence over model name
-        if let Some(name) = self.encoding_name {
-            return tiktoken::get_encoding(name).unwrap_or_else(default);
-        }
-
-        // try model name
-        if let Some(model) = self.model_name {
-            return tiktoken::encoding_for_model(model)
-                .or_else(|| tiktoken::get_encoding(model))
-                .unwrap_or_else(default);
-        }
-
-        default()
+        resolve(self.encoding_name, self.model_name)
     }
+}
+
+/// The encoder for an encoding name or, failing that, a model name;
+/// `o200k_base` when neither resolves.
+pub(crate) fn resolve(encoding: Option<&str>, model: Option<&str>) -> &'static tiktoken::CoreBpe {
+    let default = || tiktoken::get_encoding("o200k_base").expect("o200k_base encoding");
+    if let Some(name) = encoding {
+        return tiktoken::get_encoding(name).unwrap_or_else(default);
+    }
+    if let Some(model) = model {
+        return tiktoken::encoding_for_model(model)
+            .or_else(|| tiktoken::get_encoding(model))
+            .unwrap_or_else(default);
+    }
+    default()
+}
+
+/// Split `text` with one strategy; the path every synchronous entry point takes.
+pub(crate) fn run(
+    text: &str,
+    encoder: &tiktoken::CoreBpe,
+    strategy: Strategy,
+    max: usize,
+    overlap: usize,
+) -> Vec<Chunk> {
+    let doc = crate::plan::Doc::new(text, encoder);
+    let mut chunks = match strategy {
+        Strategy::Recursive => crate::recursive::split_recursive(&doc, max, overlap),
+        Strategy::Markdown => crate::markdown::split_markdown(&doc, max, overlap),
+        Strategy::Code => crate::code::split_code(&doc, max, overlap),
+        Strategy::Html => crate::html::split_html(&doc, max, overlap),
+    };
+    crate::finish(&mut chunks);
+    chunks
 }
 
 /// Builder for semantic splitting, produced by

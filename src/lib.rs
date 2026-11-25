@@ -149,6 +149,7 @@
 
 mod builder;
 mod chunk;
+mod chunker;
 mod code;
 mod html;
 mod markdown;
@@ -161,6 +162,7 @@ mod semantic;
 pub use builder::SemanticChunkBuilder;
 pub use builder::{ChunkBuilder, chunk};
 pub use chunk::Chunk;
+pub use chunker::Chunker;
 
 /// Final pass shared by every strategy: drop chunks with nothing in them and
 /// number what is left.
