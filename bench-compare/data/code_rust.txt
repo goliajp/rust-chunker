@@ -1,0 +1,2827 @@
+use regex::Regex;
+use rustc_hash::FxHashMap;
+
+use crate::merge;
+use crate::piece_cache;
+use crate::pretokenize::{FastPath, PreTokenizer, RegexPreTokenizer, WhitespaceRules};
+use crate::vocab::Vocab;
+
+/// A Byte Pair Encoding tokenizer engine.
+///
+/// Instances are created via [`get_encoding`](crate::get_encoding) or
+/// [`encoding_for_model`](crate::encoding_for_model) and cached globally.
+///
+/// # Examples
+///
+/// ```
+/// let enc = tiktoken::get_encoding("cl100k_base").unwrap();
+///
+/// // encode
+/// let tokens = enc.encode("hello world");
+/// assert_eq!(tokens, vec![15339, 1917]);
+///
+/// // decode
+/// let text = enc.decode_to_string(&tokens).unwrap();
+/// assert_eq!(text, "hello world");
+///
+/// // count without allocating
+/// assert_eq!(enc.count("hello world"), 2);
+/// ```
+pub struct CoreBpe {
+    vocab: Vocab,
+    /// Identity for the thread-local piece cache — a nonce, never an address.
+    cache_id: u64,
+    special_encoder: FxHashMap<Vec<u8>, u32>,
+    special_decoder: FxHashMap<u32, Vec<u8>>,
+    pre_tokenizer: RegexPreTokenizer,
+    special_regex: Option<Regex>,
+}
+
+impl CoreBpe {
+    pub(crate) fn new(
+        encoder: FxHashMap<Vec<u8>, u32>,
+        special_encoder: FxHashMap<Vec<u8>, u32>,
+        pattern: &str,
+        fast: FastPath,
+        ws: WhitespaceRules,
+    ) -> Self {
+        let pre_tokenizer = RegexPreTokenizer::new(pattern, fast, ws);
+
+        let special_regex = if special_encoder.is_empty() {
+            None
+        } else {
+            debug_assert!(
+                special_encoder.keys().all(|k| !k.is_empty()),
+                "special token keys must not be empty"
+            );
+            let pat = special_encoder
+                .keys()
+                .map(|k| regex::escape(&String::from_utf8_lossy(k)))
+                .collect::<Vec<_>>()
+                .join("|");
+            Some(Regex::new(&pat).expect("invalid special regex"))
+        };
+
+        let special_decoder = special_encoder
+            .iter()
+            .map(|(k, &v)| (v, k.clone()))
+            .collect();
+
+        let entries: Vec<(Vec<u8>, u32)> = encoder.into_iter().collect();
+        let vocab = Vocab::from_entries(entries);
+
+        Self {
+            vocab,
+            cache_id: piece_cache::new_cache_id(),
+            special_encoder,
+            special_decoder,
+            pre_tokenizer,
+            special_regex,
+        }
+    }
+
+    /// Encode text into token ids.
+    ///
+    /// Special tokens like `<|endoftext|>` are treated as ordinary text.
+    /// Use [`encode_with_special_tokens`](Self::encode_with_special_tokens) to recognize them.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let enc = tiktoken::get_encoding("cl100k_base").unwrap();
+    /// let tokens = enc.encode("hello world");
+    /// assert_eq!(tokens, vec![15339, 1917]);
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn encode(&self, text: &str) -> Vec<u32> {
+        let mut result = Vec::with_capacity(text.len() / 3);
+        self.encode_into(text, &mut result);
+        result
+    }
+
+    /// Encode text into token ids, recognizing special tokens.
+    ///
+    /// Special tokens (e.g. `<|endoftext|>`) are encoded as their designated ids
+    /// instead of being split into sub-word pieces.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let enc = tiktoken::get_encoding("cl100k_base").unwrap();
+    /// let tokens = enc.encode_with_special_tokens("hello<|endoftext|>world");
+    /// assert!(tokens.contains(&100257)); // <|endoftext|> token id
+    /// ```
+    #[must_use]
+    pub fn encode_with_special_tokens(&self, text: &str) -> Vec<u32> {
+        let special_regex = match &self.special_regex {
+            Some(r) => r,
+            None => return self.encode(text),
+        };
+
+        let mut result = Vec::with_capacity(text.len() / 3);
+        let mut start = 0;
+
+        for mat in special_regex.find_iter(text) {
+            if mat.start() > start {
+                self.encode_into(&text[start..mat.start()], &mut result);
+            }
+            let piece = &text.as_bytes()[mat.start()..mat.end()];
+            if let Some(&token) = self.special_encoder.get(piece) {
+                result.push(token);
+            } else {
+                debug_assert!(
+                    false,
+                    "special regex matched {:?} but no encoder entry found",
+                    String::from_utf8_lossy(piece)
+                );
+            }
+            start = mat.end();
+        }
+
+        if start < text.len() {
+            self.encode_into(&text[start..], &mut result);
+        }
+
+        result
+    }
+
+    /// Decode token ids back to raw bytes.
+    ///
+    /// Use [`decode_to_string`](Self::decode_to_string) if you want a `String` directly.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let enc = tiktoken::get_encoding("cl100k_base").unwrap();
+    /// let bytes = enc.decode(&[15339, 1917]);
+    /// assert_eq!(&bytes, b"hello world");
+    /// ```
+    #[must_use]
+    pub fn decode(&self, tokens: &[u32]) -> Vec<u8> {
+        let mut result = Vec::with_capacity(tokens.len() * 4);
+        for &token in tokens {
+            if let Some(bytes) = self.vocab.try_decode(token) {
+                result.extend_from_slice(bytes);
+                continue;
+            }
+            if let Some(bytes) = self.special_decoder.get(&token) {
+                result.extend_from_slice(bytes);
+            }
+        }
+        result
+    }
+
+    /// Decode token ids back to a UTF-8 string.
+    ///
+    /// Returns `Err` if the decoded bytes are not valid UTF-8.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let enc = tiktoken::get_encoding("cl100k_base").unwrap();
+    /// let text = enc.decode_to_string(&[15339, 1917]).unwrap();
+    /// assert_eq!(text, "hello world");
+    /// ```
+    pub fn decode_to_string(&self, tokens: &[u32]) -> Result<String, std::string::FromUtf8Error> {
+        String::from_utf8(self.decode(tokens))
+    }
+
+    /// Count tokens without allocating a token vector.
+    ///
+    /// This is faster than `encode(text).len()` because it avoids building
+    /// the full token id vector.
+    ///
+    /// Note: special tokens (e.g. `<|endoftext|>`) are treated as ordinary text,
+    /// matching the behavior of [`encode`](Self::encode). Use
+    /// [`count_with_special_tokens`](Self::count_with_special_tokens) if you
+    /// need special tokens to be recognized.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let enc = tiktoken::get_encoding("o200k_base").unwrap();
+    /// let count = enc.count("The quick brown fox.");
+    /// assert_eq!(count, enc.encode("The quick brown fox.").len());
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn count(&self, text: &str) -> usize {
+        let mut count = 0;
+        let mut pos = 0;
+
+        while let Some((start, end)) = self.pre_tokenizer.next_match(text, pos) {
+            let piece = &text.as_bytes()[start..end];
+            if self.vocab.contains_key(piece) {
+                count += 1;
+            } else if (3..=piece_cache::KEY_MAX).contains(&piece.len()) {
+                count += piece_cache::count_piece(self.cache_id, piece, |buf| {
+                    merge::bpe_encode_buf(piece, &self.vocab, buf)
+                });
+            } else {
+                count += merge::bpe_count(piece, &self.vocab);
+            }
+            pos = end;
+        }
+        count
+    }
+
+    /// Count tokens, recognizing special tokens.
+    ///
+    /// This is the counting equivalent of
+    /// [`encode_with_special_tokens`](Self::encode_with_special_tokens).
+    #[must_use]
+    pub fn count_with_special_tokens(&self, text: &str) -> usize {
+        let special_regex = match &self.special_regex {
+            Some(r) => r,
+            None => return self.count(text),
+        };
+
+        let mut total = 0;
+        let mut start = 0;
+
+        for mat in special_regex.find_iter(text) {
+            if mat.start() > start {
+                total += self.count(&text[start..mat.start()]);
+            }
+            total += 1; // special token = 1 token
+            start = mat.end();
+        }
+
+        if start < text.len() {
+            total += self.count(&text[start..]);
+        }
+
+        total
+    }
+
+    /// Encode text using multiple threads for large inputs.
+    ///
+    /// Falls back to single-threaded encoding for texts smaller than 4 KB.
+    /// Results are identical to [`encode`](Self::encode).
+    ///
+    /// Requires the `parallel` feature.
+    #[cfg(feature = "parallel")]
+    #[must_use]
+    pub fn encode_parallel(&self, text: &str) -> Vec<u32> {
+        use rayon::prelude::*;
+
+        // Below this size, single-threaded encode wins: the ASCII fast-path made
+        // serial tokenization cheap, and pre-tokenization (~60% of the work)
+        // stays serial here, so rayon's dispatch/join overhead dominates. Measured
+        // break-even on an M4 Pro is ~460 KB (45 KB: 1.8x slower; 180 KB: 1.1x
+        // slower; 900 KB: 1.2x faster). 512 KB keeps the parallel path strictly a
+        // win. Even above it the ceiling is only ~20% (Amdahl, serial pre-tokenize).
+        const THRESHOLD: usize = 512 * 1024;
+        if text.len() < THRESHOLD {
+            return self.encode(text);
+        }
+
+        // collect all pre-tokenizer match ranges
+        let mut ranges = Vec::new();
+        let mut pos = 0;
+        while let Some((start, end)) = self.pre_tokenizer.next_match(text, pos) {
+            ranges.push((start, end));
+            pos = end;
+        }
+
+        // Encode the pieces in parallel, but grouped into contiguous chunks so
+        // each rayon task fills a single local buffer instead of allocating one
+        // Vec per piece (which would be tens of thousands of tiny allocations on
+        // large inputs). Aim for a few chunks per worker thread for load balance.
+        let bytes = text.as_bytes();
+        let chunk_size = ranges
+            .len()
+            .div_ceil(rayon::current_num_threads() * 4)
+            .max(1);
+        let parts: Vec<Vec<u32>> = ranges
+            .par_chunks(chunk_size)
+            .map(|chunk| {
+                let span = chunk.last().map_or(0, |&(_, end)| end)
+                    - chunk.first().map_or(0, |&(start, _)| start);
+                let mut local = Vec::with_capacity(span / 3 + 1);
+                for &(start, end) in chunk {
+                    let piece = &bytes[start..end];
+                    if let Some(token) = self.vocab.get(piece) {
+                        local.push(token);
+                    } else {
+                        merge::bpe_encode(piece, &self.vocab, &mut local);
+                    }
+                }
+                local
+            })
+            .collect();
+
+        let total: usize = parts.iter().map(|c| c.len()).sum();
+        let mut result = Vec::with_capacity(total);
+        for part in parts {
+            result.extend_from_slice(&part);
+        }
+        result
+    }
+
+    /// Number of regular (non-special) tokens in the vocabulary.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let enc = tiktoken::get_encoding("cl100k_base").unwrap();
+    /// assert_eq!(enc.vocab_size(), 100256);
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn vocab_size(&self) -> usize {
+        self.vocab.len()
+    }
+
+    /// Number of special tokens (e.g. `<|endoftext|>`).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let enc = tiktoken::get_encoding("cl100k_base").unwrap();
+    /// assert_eq!(enc.num_special_tokens(), 5);
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn num_special_tokens(&self) -> usize {
+        self.special_encoder.len()
+    }
+
+    /// Main encoding hot loop. Iterates pre-tokenizer matches over the input,
+    /// then for each matched piece: (1) try direct vocab lookup (fast path for
+    /// known tokens), (2) fall back to BPE merge for unknown multi-byte pieces.
+    fn encode_into(&self, text: &str, result: &mut Vec<u32>) {
+        let bytes = text.as_bytes();
+        let mut pos = 0;
+
+        while let Some((start, end)) = self.pre_tokenizer.next_match(text, pos) {
+            let piece = &bytes[start..end];
+            if let Some(token) = self.vocab.get(piece) {
+                result.push(token);
+            } else if (3..=piece_cache::KEY_MAX).contains(&piece.len()) {
+                piece_cache::encode_piece(self.cache_id, piece, result, |buf| {
+                    merge::bpe_encode_buf(piece, &self.vocab, buf)
+                });
+            } else {
+                merge::bpe_encode(piece, &self.vocab, result);
+            }
+            pos = end;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_test_bpe() -> CoreBpe {
+        let mut encoder: FxHashMap<Vec<u8>, u32> = FxHashMap::default();
+        encoder.insert(b"a".to_vec(), 0);
+        encoder.insert(b"b".to_vec(), 1);
+        encoder.insert(b"c".to_vec(), 2);
+        encoder.insert(b"ab".to_vec(), 3);
+        encoder.insert(b"bc".to_vec(), 4);
+        encoder.insert(b"abc".to_vec(), 5);
+
+        let special: FxHashMap<Vec<u8>, u32> = FxHashMap::default();
+        CoreBpe::new(
+            encoder,
+            special,
+            r"\w+|\S",
+            FastPath::None,
+            WhitespaceRules::Generic,
+        )
+    }
+
+    #[test]
+    fn test_byte_pair_merge_single_byte() {
+        let mut ranks: FxHashMap<Vec<u8>, u32> = FxHashMap::default();
+        ranks.insert(b"x".to_vec(), 0);
+        let bpe = CoreBpe::new(
+            ranks,
+            FxHashMap::default(),
+            r"\w+|\S",
+            FastPath::None,
+            WhitespaceRules::Generic,
+        );
+        let tokens = bpe.encode("x");
+        assert_eq!(tokens, vec![0]);
+    }
+
+    #[test]
+    fn test_byte_pair_merge_known_pair() {
+        let mut ranks: FxHashMap<Vec<u8>, u32> = FxHashMap::default();
+        ranks.insert(b"a".to_vec(), 0);
+        ranks.insert(b"b".to_vec(), 1);
+        ranks.insert(b"ab".to_vec(), 2);
+        let bpe = CoreBpe::new(
+            ranks,
+            FxHashMap::default(),
+            r"\w+|\S",
+            FastPath::None,
+            WhitespaceRules::Generic,
+        );
+        let tokens = bpe.encode("ab");
+        assert_eq!(tokens, vec![2]);
+    }
+
+    #[test]
+    fn test_byte_pair_merge_unknown_pair() {
+        let mut ranks: FxHashMap<Vec<u8>, u32> = FxHashMap::default();
+        ranks.insert(b"a".to_vec(), 0);
+        ranks.insert(b"b".to_vec(), 1);
+        let bpe = CoreBpe::new(
+            ranks,
+            FxHashMap::default(),
+            r"\w|\S",
+            FastPath::None,
+            WhitespaceRules::Generic,
+        );
+        let tokens = bpe.encode("ab");
+        assert_eq!(tokens, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_encode_decode_roundtrip() {
+        let bpe = make_test_bpe();
+        let tokens = bpe.encode("abc");
+        let decoded = bpe.decode(&tokens);
+        assert_eq!(&decoded, b"abc");
+    }
+
+    #[test]
+    fn test_count_matches_encode_len() {
+        let bpe = make_test_bpe();
+        let text = "abc";
+        assert_eq!(bpe.count(text), bpe.encode(text).len());
+    }
+
+    #[test]
+    fn test_empty_input() {
+        let bpe = make_test_bpe();
+        assert_eq!(bpe.encode(""), Vec::<u32>::new());
+        assert_eq!(bpe.count(""), 0);
+        assert_eq!(bpe.decode(&[]), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn test_multi_step_bpe_merge() {
+        let mut ranks: FxHashMap<Vec<u8>, u32> = FxHashMap::default();
+        ranks.insert(b"d".to_vec(), 0);
+        ranks.insert(b"e".to_vec(), 1);
+        ranks.insert(b"f".to_vec(), 2);
+        ranks.insert(b"de".to_vec(), 3);
+        ranks.insert(b"ef".to_vec(), 4);
+        let bpe = CoreBpe::new(
+            ranks,
+            FxHashMap::default(),
+            r"\w+|\S",
+            FastPath::None,
+            WhitespaceRules::Generic,
+        );
+        let tokens = bpe.encode("def");
+        assert_eq!(tokens, vec![3, 2]); // de=3, f=2
+    }
+
+    #[test]
+    fn test_decode_to_string_invalid_utf8() {
+        let mut encoder: FxHashMap<Vec<u8>, u32> = FxHashMap::default();
+        encoder.insert(vec![0xFF, 0xFE], 0);
+        let bpe = CoreBpe::new(
+            encoder,
+            FxHashMap::default(),
+            r"[\s\S]+",
+            FastPath::None,
+            WhitespaceRules::Generic,
+        );
+        assert!(bpe.decode_to_string(&[0]).is_err());
+    }
+
+    #[test]
+    fn test_encode_with_special_tokens_no_specials() {
+        let bpe = make_test_bpe();
+        assert_eq!(bpe.encode("abc"), bpe.encode_with_special_tokens("abc"));
+    }
+
+    #[test]
+    fn test_encode_with_special_tokens_mixed() {
+        let mut encoder: FxHashMap<Vec<u8>, u32> = FxHashMap::default();
+        encoder.insert(b"x".to_vec(), 0);
+        encoder.insert(b"y".to_vec(), 1);
+        let mut special: FxHashMap<Vec<u8>, u32> = FxHashMap::default();
+        special.insert(b"<|end|>".to_vec(), 99);
+        let bpe = CoreBpe::new(
+            encoder,
+            special,
+            r"\w|\S",
+            FastPath::None,
+            WhitespaceRules::Generic,
+        );
+        let tokens = bpe.encode_with_special_tokens("x<|end|>y");
+        assert_eq!(tokens, vec![0, 99, 1]);
+    }
+
+    #[test]
+    fn test_decode_includes_special_tokens() {
+        let mut encoder: FxHashMap<Vec<u8>, u32> = FxHashMap::default();
+        encoder.insert(b"hi".to_vec(), 0);
+        let mut special: FxHashMap<Vec<u8>, u32> = FxHashMap::default();
+        special.insert(b"<|end|>".to_vec(), 99);
+        let bpe = CoreBpe::new(
+            encoder,
+            special,
+            r"\w+|\S",
+            FastPath::None,
+            WhitespaceRules::Generic,
+        );
+        let decoded = bpe.decode(&[0, 99]);
+        assert_eq!(&decoded, b"hi<|end|>");
+    }
+
+    #[test]
+    fn test_bpe_merge_full_collapse() {
+        let mut ranks: FxHashMap<Vec<u8>, u32> = FxHashMap::default();
+        ranks.insert(b"a".to_vec(), 10);
+        ranks.insert(b"b".to_vec(), 20);
+        ranks.insert(b"c".to_vec(), 30);
+        ranks.insert(b"ab".to_vec(), 5);
+        ranks.insert(b"abc".to_vec(), 3);
+        let bpe = CoreBpe::new(
+            ranks.clone(),
+            FxHashMap::default(),
+            r"\w+|\S",
+            FastPath::None,
+            WhitespaceRules::Generic,
+        );
+        let tokens = bpe.encode("abc");
+        assert_eq!(tokens, vec![3]);
+
+        ranks.insert(b"d".to_vec(), 40);
+        ranks.insert(b"cd".to_vec(), 7);
+        ranks.insert(b"abcd".to_vec(), 1);
+        let bpe2 = CoreBpe::new(
+            ranks,
+            FxHashMap::default(),
+            r"\w+|\S",
+            FastPath::None,
+            WhitespaceRules::Generic,
+        );
+        let tokens2 = bpe2.encode("abcd");
+        assert_eq!(tokens2, vec![1]);
+    }
+
+    #[test]
+    fn test_bpe_merge_to_two_parts() {
+        let mut ranks: FxHashMap<Vec<u8>, u32> = FxHashMap::default();
+        ranks.insert(b"a".to_vec(), 10);
+        ranks.insert(b"b".to_vec(), 20);
+        ranks.insert(b"c".to_vec(), 30);
+        ranks.insert(b"x".to_vec(), 40);
+        ranks.insert(b"ab".to_vec(), 5);
+        ranks.insert(b"abc".to_vec(), 2);
+        ranks.insert(b"cx".to_vec(), 15);
+        ranks.insert(b"abcx".to_vec(), 1);
+        let bpe = CoreBpe::new(
+            ranks,
+            FxHashMap::default(),
+            r"\w+|\S",
+            FastPath::None,
+            WhitespaceRules::Generic,
+        );
+        assert_eq!(bpe.encode("abcx"), vec![1]);
+    }
+
+    #[test]
+    fn test_bpe_count_single_byte_fallback() {
+        let mut ranks: FxHashMap<Vec<u8>, u32> = FxHashMap::default();
+        ranks.insert(b"a".to_vec(), 0);
+        ranks.insert(b"b".to_vec(), 1);
+        let bpe = CoreBpe::new(
+            ranks,
+            FxHashMap::default(),
+            r"\w+|\S",
+            FastPath::None,
+            WhitespaceRules::Generic,
+        );
+        assert_eq!(bpe.count("ab"), 2);
+        assert_eq!(bpe.encode("ab"), vec![0, 1]);
+    }
+
+    #[test]
+    fn test_count_with_special_tokens() {
+        let mut encoder: FxHashMap<Vec<u8>, u32> = FxHashMap::default();
+        encoder.insert(b"x".to_vec(), 0);
+        encoder.insert(b"y".to_vec(), 1);
+        let mut special: FxHashMap<Vec<u8>, u32> = FxHashMap::default();
+        special.insert(b"<|end|>".to_vec(), 99);
+        let bpe = CoreBpe::new(
+            encoder,
+            special,
+            r"\w|\S",
+            FastPath::None,
+            WhitespaceRules::Generic,
+        );
+
+        assert_eq!(
+            bpe.count_with_special_tokens("x<|end|>y"),
+            bpe.encode_with_special_tokens("x<|end|>y").len()
+        );
+    }
+
+    #[test]
+    fn test_count_with_special_tokens_no_specials() {
+        let bpe = make_test_bpe();
+        assert_eq!(bpe.count_with_special_tokens("abc"), bpe.count("abc"));
+    }
+
+    #[test]
+    fn test_encode_with_special_tokens_trailing_text() {
+        let mut encoder: FxHashMap<Vec<u8>, u32> = FxHashMap::default();
+        encoder.insert(b"a".to_vec(), 0);
+        encoder.insert(b"b".to_vec(), 1);
+        let mut special: FxHashMap<Vec<u8>, u32> = FxHashMap::default();
+        special.insert(b"<|s|>".to_vec(), 99);
+        let bpe = CoreBpe::new(
+            encoder,
+            special,
+            r"\w|\S",
+            FastPath::None,
+            WhitespaceRules::Generic,
+        );
+        let tokens = bpe.encode_with_special_tokens("a<|s|>b");
+        assert_eq!(tokens, vec![0, 99, 1]);
+    }
+}
+//! Encoding definitions and data parsing for tiktoken-compatible BPE vocabularies.
+//!
+//! Each encoding consists of:
+//! - A `.tkv.zst` data file (see [`parse_tkv`] for the format), embedded at compile time
+//! - A regex pattern that splits input text into pieces before BPE processing
+//! - A set of special tokens (e.g. `<|endoftext|>`) with designated token ids
+//!
+//! Pattern source: <https://github.com/openai/tiktoken/blob/main/tiktoken_ext/openai_public.py>
+
+use rustc_hash::FxHashMap;
+
+use crate::bpe::CoreBpe;
+use crate::pretokenize::{FastPath, WhitespaceRules};
+
+// Embedded vocabulary frames, decompressed on first use via the OnceLocks in
+// lib.rs. The data lives in the tiktoken-vocab-* crates, one per vendor, built
+// from the `tests/vocab-oracle/*.tiktoken.zst` reference files by
+// `vocabs/tools/build_tkv.py`; the `vocab_oracle` tests below diff the two.
+//
+// Each file is gated on its `vocab-*` feature so that a build only carries the
+// vocabularies it names — see the feature table in Cargo.toml.
+#[cfg(feature = "vocab-cl100k_base")]
+const CL100K_BASE_TKV: &[u8] = tiktoken_vocab_openai::CL100K_BASE;
+#[cfg(feature = "vocab-o200k_base")]
+const O200K_BASE_TKV: &[u8] = tiktoken_vocab_openai::O200K_BASE;
+#[cfg(feature = "vocab-r50k_base")]
+const R50K_BASE_TKV: &[u8] = tiktoken_vocab_openai::R50K_BASE;
+#[cfg(feature = "vocab-deepseek_v3")]
+const DEEPSEEK_V3_TKV: &[u8] = tiktoken_vocab_deepseek::DEEPSEEK_V3;
+#[cfg(feature = "vocab-qwen2")]
+const QWEN2_TKV: &[u8] = tiktoken_vocab_qwen::QWEN2;
+#[cfg(feature = "vocab-mistral_v3")]
+const MISTRAL_V3_TKV: &[u8] = tiktoken_vocab_mistral::MISTRAL_V3;
+#[cfg(feature = "vocab-kimi_k2")]
+const KIMI_K2_TKV: &[u8] = tiktoken_vocab_moonshot::KIMI_K2;
+#[cfg(feature = "vocab-glm4")]
+const GLM4_TKV: &[u8] = tiktoken_vocab_zhipu::GLM4;
+#[cfg(feature = "vocab-minimax_m2")]
+const MINIMAX_M2_TKV: &[u8] = tiktoken_vocab_minimax::MINIMAX_M2;
+#[cfg(feature = "vocab-qwen3_5")]
+const QWEN3_5_TKV: &[u8] = tiktoken_vocab_qwen::QWEN3_5;
+#[cfg(feature = "vocab-llama4")]
+const LLAMA4_TKV: &[u8] = tiktoken_vocab_meta::LLAMA4;
+#[cfg(feature = "vocab-mistral_v15")]
+const MISTRAL_V15_TKV: &[u8] = tiktoken_vocab_mistral::MISTRAL_V15;
+
+// Three vocabularies are exact rank-aligned extensions of another one: every
+// token at rank `i` of the base is the token at rank `i` of the derived
+// vocabulary. Their files hold only the tail, so the shared prefix is stored
+// once. Reconstructing them costs nothing extra at run time — those leading
+// entries have to be built either way. Their features pull in the base's
+// feature, which is why the chains below can reference it unconditionally.
+#[cfg(feature = "vocab-llama3")]
+const LLAMA3_TAIL_TKV: &[u8] = tiktoken_vocab_meta::LLAMA3_TAIL;
+#[cfg(feature = "vocab-glm5")]
+const GLM5_TAIL_TKV: &[u8] = tiktoken_vocab_zhipu::GLM5_TAIL;
+#[cfg(feature = "vocab-p50k_base")]
+const P50K_BASE_TAIL_TKV: &[u8] = tiktoken_vocab_openai::P50K_BASE_TAIL;
+
+#[cfg(feature = "vocab-cl100k_base")]
+pub(crate) const CL100K_BASE_CHAIN: &[&[u8]] = &[CL100K_BASE_TKV];
+#[cfg(feature = "vocab-o200k_base")]
+pub(crate) const O200K_BASE_CHAIN: &[&[u8]] = &[O200K_BASE_TKV];
+#[cfg(feature = "vocab-r50k_base")]
+pub(crate) const R50K_BASE_CHAIN: &[&[u8]] = &[R50K_BASE_TKV];
+#[cfg(feature = "vocab-deepseek_v3")]
+pub(crate) const DEEPSEEK_V3_CHAIN: &[&[u8]] = &[DEEPSEEK_V3_TKV];
+#[cfg(feature = "vocab-qwen2")]
+pub(crate) const QWEN2_CHAIN: &[&[u8]] = &[QWEN2_TKV];
+#[cfg(feature = "vocab-mistral_v3")]
+pub(crate) const MISTRAL_V3_CHAIN: &[&[u8]] = &[MISTRAL_V3_TKV];
+#[cfg(feature = "vocab-kimi_k2")]
+pub(crate) const KIMI_K2_CHAIN: &[&[u8]] = &[KIMI_K2_TKV];
+#[cfg(feature = "vocab-glm4")]
+pub(crate) const GLM4_CHAIN: &[&[u8]] = &[GLM4_TKV];
+#[cfg(feature = "vocab-minimax_m2")]
+pub(crate) const MINIMAX_M2_CHAIN: &[&[u8]] = &[MINIMAX_M2_TKV];
+#[cfg(feature = "vocab-qwen3_5")]
+pub(crate) const QWEN3_5_CHAIN: &[&[u8]] = &[QWEN3_5_TKV];
+#[cfg(feature = "vocab-llama4")]
+pub(crate) const LLAMA4_CHAIN: &[&[u8]] = &[LLAMA4_TKV];
+#[cfg(feature = "vocab-mistral_v15")]
+pub(crate) const MISTRAL_V15_CHAIN: &[&[u8]] = &[MISTRAL_V15_TKV];
+#[cfg(feature = "vocab-llama3")]
+pub(crate) const LLAMA3_CHAIN: &[&[u8]] = &[CL100K_BASE_TKV, LLAMA3_TAIL_TKV];
+#[cfg(feature = "vocab-glm5")]
+pub(crate) const GLM5_CHAIN: &[&[u8]] = &[GLM4_TKV, GLM5_TAIL_TKV];
+#[cfg(feature = "vocab-p50k_base")]
+pub(crate) const P50K_BASE_CHAIN: &[&[u8]] = &[R50K_BASE_TKV, P50K_BASE_TAIL_TKV];
+
+// cl100k pattern: handles English contractions, Unicode letters/numbers, punctuation, whitespace.
+// original tiktoken uses `\s+(?!\S)|\s+` but we use plain `\s+` and emulate the negative
+// lookahead in bpe.rs::adjust_whitespace_end — this lets us use the `regex` crate's DFA engine
+// instead of a slower backtracking engine like fancy-regex or pcre2.
+pub(crate) const CL100K_PATTERN: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+";
+
+// o200k pattern: similar to cl100k but with finer Unicode category distinctions
+// (Lu/Lt/Lm/Lo/M vs plain \p{L}), supporting better CamelCase and mixed-script
+// splitting. Note the punctuation rule's `[\r\n/]*` tail: unlike cl100k, o200k
+// admits `/` there and the vocabulary leans on it — ".\n/" is a single token.
+pub(crate) const O200K_PATTERN: &str = concat!(
+    r"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+",
+    r"(?i:'s|'t|'re|'ve|'m|'ll|'d)?",
+    r"|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*",
+    r"(?i:'s|'t|'re|'ve|'m|'ll|'d)?",
+    r"|\p{N}{1,3}",
+    r"| ?[^\s\p{L}\p{N}]+[\r\n/]*",
+    r"|\s*[\r\n]+",
+    r"|\s+",
+);
+
+// p50k/r50k pattern: simpler, older pattern used by GPT-3 era models
+pub(crate) const P50K_PATTERN: &str =
+    r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+";
+
+// llama3 pattern: same structure as cl100k (contractions, letters, numbers, punctuation, whitespace)
+// original uses `\s+(?!\S)|\s+` — we emulate the lookahead in pretokenize.rs
+const LLAMA3_PATTERN: &str = CL100K_PATTERN;
+
+// deepseek v3 pattern: 3 sequential splits combined into one alternation.
+// priority: numbers (1-3 digits) > CJK/Japanese > general pattern
+// final catch-all `[\s\S]` ensures format chars (ZWJ etc.) are not skipped,
+// matching HF's Split/Isolated behavior where non-matching text is kept.
+pub(crate) const DEEPSEEK_V3_PATTERN: &str = concat!(
+    r"\p{N}{1,3}",
+    r"|[一-龥\x{3040}-\x{309F}\x{30A0}-\x{30FF}]+",
+    r"|[!-/:-@\[-`{-~][A-Za-z]+",
+    r"|[^\r\n\p{L}\p{P}\p{S}]?[\p{L}\p{M}]+",
+    r"| ?[\p{P}\p{S}]+[\r\n]*",
+    r"|\s*[\r\n]+",
+    r"|\s+",
+    r"|[\s\S]",
+);
+
+// qwen2 pattern: similar to cl100k but \p{N} matches single digits (not 1-3)
+pub(crate) const QWEN2_PATTERN: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+";
+
+// qwen3_5 pattern (Qwen 3.5 and later): qwen2's, except that the letter rule
+// also takes combining marks (`[\p{L}\p{M}]+`) and the punctuation rule
+// excludes them. The two differ only on text with combining marks.
+pub(crate) const QWEN3_5_PATTERN: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+|\p{N}| ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+";
+
+// llama4 pattern (Llama 4): identical to minimax_m2's, o200k with a `[\r\n/]*`
+// punctuation tail.
+const LLAMA4_PATTERN: &str = MINIMAX_M2_PATTERN;
+
+// kimi pattern (Kimi K2 / K3, from moonshotai's tokenization_kimi.py): a
+// dedicated leading `[\p{Han}]+` branch, then o200k-style case-splitting rules
+// whose letter classes use set intersection to exclude Han (so CJK never mixes
+// into a case-split word), then the digit/punct/whitespace rules shared with
+// o200k. The original ends `\s+(?!\S)|\s+`; the lookahead is emulated via
+// `WhitespaceRules::NewlineFirst` like the other patterns.
+pub(crate) const KIMI_PATTERN: &str = concat!(
+    r"[\p{Han}]+",
+    r"|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]*[\p{Ll}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]+",
+    r"(?i:'s|'t|'re|'ve|'m|'ll|'d)?",
+    r"|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]+[\p{Ll}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]*",
+    r"(?i:'s|'t|'re|'ve|'m|'ll|'d)?",
+    r"|\p{N}{1,3}",
+    r"| ?[^\s\p{L}\p{N}]+[\r\n]*",
+    r"|\s*[\r\n]+",
+    r"|\s+",
+);
+
+// glm4 / glm5 (Zhipu GLM-4.x / GLM-5.x): the tokenizer.json split regex is
+// exactly the cl100k pattern; the two generations differ only in vocabulary
+// (151,329 vs 154,820 base tokens, independently trained merges).
+const GLM_PATTERN: &str = CL100K_PATTERN;
+
+// minimax_m2 (MiniMax M2 family): o200k's letter/digit/whitespace rules, but
+// the punctuation rule's trailing class is `[\r\n/]*` (admitting `/`, like
+// Tekken) rather than o200k's `[\r\n]*`.
+pub(crate) const MINIMAX_M2_PATTERN: &str = concat!(
+    r"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+",
+    r"(?i:'s|'t|'re|'ve|'m|'ll|'d)?",
+    r"|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*",
+    r"(?i:'s|'t|'re|'ve|'m|'ll|'d)?",
+    r"|\p{N}{1,3}",
+    r"| ?[^\s\p{L}\p{N}]+[\r\n/]*",
+    r"|\s*[\r\n]+",
+    r"|\s+",
+);
+
+// mistral v3 (tekken) pattern. Case-splitting like o200k, but with three
+// deliberate differences that a cl100k/o200k stand-in gets wrong:
+//   - no contraction rule at all (no `(?i:'s|'t|…)` alternative or suffix)
+//   - `\p{N}` matches a single digit, not `\p{N}{1,3}`
+//   - the punctuation rule's trailing class is `[\r\n/]*`, admitting `/`
+// Source: the `Split` pre-tokenizer regex in Tekken's tokenizer.json
+// (e.g. mistralai/Mistral-Nemo-Base-2407).
+pub(crate) const MISTRAL_V3_PATTERN: &str = concat!(
+    r"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+",
+    r"|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*",
+    r"|\p{N}",
+    r"| ?[^\s\p{L}\p{N}]+[\r\n/]*",
+    r"|\s*[\r\n]+",
+    r"|\s+",
+);
+
+// mistral v15 (Tekken v15, Mistral Large 4) pattern: v3's, except digits. The
+// upstream rule `\p{N}{1,3}(?=(?:\p{N}{3})*(?!\p{N}))|\p{N}{1,2}` groups a digit
+// run in threes from the right; the lookahead is out of the `regex` crate's
+// reach, so `FastPath::Tekken15` cuts digit runs before the regex runs, and
+// the regex only needs to classify them.
+pub(crate) const MISTRAL_V15_PATTERN: &str = concat!(
+    r"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+",
+    r"|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*",
+    r"|\p{N}+",
+    r"| ?[^\s\p{L}\p{N}]+[\r\n/]*",
+    r"|\s*[\r\n]+",
+    r"|\s+",
+);
+
+/// Parse a chain of zstd-compressed `.tkv.zst` frames into a rank map.
+///
+/// A chain is one frame for a self-contained vocabulary, or a base frame
+/// followed by a tail frame for one of the three rank-aligned extensions
+/// (llama3 over cl100k_base, glm5 over glm4, p50k_base over r50k_base).
+///
+/// Frame layout, after zstd decompression:
+///
+/// ```text
+/// "TKV1"      4 B    magic
+/// n_tokens    4 B    u32 LE
+/// rank0       4 B    u32 LE   rank of this frame's first token
+/// lengths     varint x n_tokens, in rank order
+/// body        token bytes, grouped by length class (ascending),
+///             each class in rank order
+/// ```
+///
+/// Ranks are consecutive within a frame, so the rank of the `i`-th token is
+/// `rank0 + i` and no rank column is stored. The body is grouped by length
+/// rather than laid out in rank order because the length block is read first
+/// and already says which class each token comes from — the regrouping is free
+/// and compresses better. Files are produced by `vocabs/tools/build_tkv.py`.
+///
+/// The data is embedded at compile time, so malformed input is a build defect,
+/// not a runtime condition: this panics rather than returning an error.
+pub(crate) fn parse_tkv(chain: &[&[u8]]) -> FxHashMap<Vec<u8>, u32> {
+    let mut ranks = FxHashMap::default();
+    for frame in chain {
+        let mut decoder =
+            ruzstd::decoding::StreamingDecoder::new(*frame).expect("zstd decompression failed");
+        let mut data = Vec::new();
+        std::io::Read::read_to_end(&mut decoder, &mut data).expect("zstd decompression failed");
+        insert_frame(&data, &mut ranks);
+    }
+    ranks
+}
+
+/// Decode one decompressed TKV1 frame into `ranks`.
+fn insert_frame(data: &[u8], ranks: &mut FxHashMap<Vec<u8>, u32>) {
+    assert_eq!(&data[..4], b"TKV1", "bad vocabulary frame magic");
+    let n_tokens = u32::from_le_bytes(data[4..8].try_into().unwrap()) as usize;
+    let rank0 = u32::from_le_bytes(data[8..12].try_into().unwrap());
+
+    let mut pos = 12;
+    let mut lengths = Vec::with_capacity(n_tokens);
+    let mut max_len = 0usize;
+    for _ in 0..n_tokens {
+        let mut len = 0usize;
+        let mut shift = 0;
+        loop {
+            let byte = data[pos];
+            pos += 1;
+            len |= ((byte & 0x7F) as usize) << shift;
+            if byte & 0x80 == 0 {
+                break;
+            }
+            shift += 7;
+        }
+        max_len = max_len.max(len);
+        lengths.push(len);
+    }
+
+    // where each length class starts in the body
+    let mut cursors = vec![0usize; max_len + 1];
+    for &len in &lengths {
+        cursors[len] += 1;
+    }
+    let mut at = pos;
+    for (len, cursor) in cursors.iter_mut().enumerate() {
+        let count = *cursor;
+        *cursor = at;
+        at += len * count;
+    }
+    assert_eq!(at, data.len(), "vocabulary frame body length mismatch");
+
+    ranks.reserve(n_tokens);
+    for (i, &len) in lengths.iter().enumerate() {
+        let start = cursors[len];
+        cursors[len] = start + len;
+        ranks.insert(data[start..start + len].to_vec(), rank0 + i as u32);
+    }
+}
+
+mod deepseek;
+mod meta;
+mod minimax;
+mod mistral;
+mod moonshot;
+mod openai;
+mod qwen;
+mod zhipu;
+
+pub use deepseek::*;
+pub use meta::*;
+pub use minimax::*;
+pub use mistral::*;
+pub use moonshot::*;
+pub use openai::*;
+pub use qwen::*;
+pub use zhipu::*;
+
+/// Build a special token map from `(text, id)` pairs.
+fn special_tokens(pairs: &[(&str, u32)]) -> FxHashMap<Vec<u8>, u32> {
+    pairs
+        .iter()
+        .map(|&(s, v)| (s.as_bytes().to_vec(), v))
+        .collect()
+}
+
+/// Expose cl100k rank map for internal tests (e.g. Vocab equivalence)
+#[cfg(all(test, feature = "vocab-cl100k_base"))]
+pub(crate) fn parse_tiktoken_data_for_test() -> FxHashMap<Vec<u8>, u32> {
+    parse_tkv(CL100K_BASE_CHAIN)
+}
+
+/// Differential guard for the shipped vocabulary data.
+///
+/// The `.tkv.zst` files are a compact re-encoding of the `.tiktoken.zst`
+/// reference files under `tests/vocab-oracle/` (base64 token + explicit rank,
+/// one per line — the form upstream publishes). Those references stay in the
+/// repository and out of the published package, so a re-encoding bug cannot
+/// hide: every shipped frame chain is decoded here and diffed against them,
+/// entry by entry.
+#[cfg(test)]
+mod vocab_oracle {
+    use super::*;
+    use base64::Engine;
+
+    /// Every vocabulary this build carries, as (name, frame chain).
+    // the pushes are cfg-gated, so a collect() would not express this
+    #[allow(clippy::vec_init_then_push)]
+    fn chains() -> Vec<(&'static str, &'static [&'static [u8]])> {
+        #[allow(unused_mut)]
+        let mut chains: Vec<(&'static str, &'static [&'static [u8]])> = Vec::new();
+        #[cfg(feature = "vocab-cl100k_base")]
+        chains.push(("cl100k_base", CL100K_BASE_CHAIN));
+        #[cfg(feature = "vocab-o200k_base")]
+        chains.push(("o200k_base", O200K_BASE_CHAIN));
+        #[cfg(feature = "vocab-r50k_base")]
+        chains.push(("r50k_base", R50K_BASE_CHAIN));
+        #[cfg(feature = "vocab-p50k_base")]
+        chains.push(("p50k_base", P50K_BASE_CHAIN));
+        #[cfg(feature = "vocab-llama3")]
+        chains.push(("llama3", LLAMA3_CHAIN));
+        #[cfg(feature = "vocab-deepseek_v3")]
+        chains.push(("deepseek_v3", DEEPSEEK_V3_CHAIN));
+        #[cfg(feature = "vocab-qwen2")]
+        chains.push(("qwen2", QWEN2_CHAIN));
+        #[cfg(feature = "vocab-mistral_v3")]
+        chains.push(("mistral_v3", MISTRAL_V3_CHAIN));
+        #[cfg(feature = "vocab-kimi_k2")]
+        chains.push(("kimi_k2", KIMI_K2_CHAIN));
+        #[cfg(feature = "vocab-glm4")]
+        chains.push(("glm4", GLM4_CHAIN));
+        #[cfg(feature = "vocab-glm5")]
+        chains.push(("glm5", GLM5_CHAIN));
+        #[cfg(feature = "vocab-minimax_m2")]
+        chains.push(("minimax_m2", MINIMAX_M2_CHAIN));
+        #[cfg(feature = "vocab-qwen3_5")]
+        chains.push(("qwen3_5", QWEN3_5_CHAIN));
+        #[cfg(feature = "vocab-llama4")]
+        chains.push(("llama4", LLAMA4_CHAIN));
+        #[cfg(feature = "vocab-mistral_v15")]
+        chains.push(("mistral_v15", MISTRAL_V15_CHAIN));
+        chains
+    }
+
+    /// Parse `tests/vocab-oracle/<name>.tiktoken.zst`: one
+    /// `<base64(token bytes)> <rank>` line per entry.
+    fn oracle(name: &str) -> FxHashMap<Vec<u8>, u32> {
+        let path = format!(
+            "{}/tests/vocab-oracle/{name}.tiktoken.zst",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let compressed = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let mut decoder = ruzstd::decoding::StreamingDecoder::new(compressed.as_slice()).unwrap();
+        let mut data = Vec::new();
+        std::io::Read::read_to_end(&mut decoder, &mut data).unwrap();
+
+        let engine = base64::engine::general_purpose::STANDARD;
+        let text = std::str::from_utf8(&data).unwrap();
+        let mut ranks = FxHashMap::default();
+        for line in text.lines().filter(|l| !l.trim().is_empty()) {
+            let (token, rank) = line.trim().split_once(' ').expect("malformed oracle line");
+            ranks.insert(engine.decode(token).unwrap(), rank.parse().unwrap());
+        }
+        ranks
+    }
+
+    #[test]
+    fn shipped_vocabularies_match_the_oracle() {
+        for (name, chain) in chains() {
+            let shipped = parse_tkv(chain);
+            let reference = oracle(name);
+            assert_eq!(
+                shipped.len(),
+                reference.len(),
+                "[{name}] token count: {} shipped vs {} in oracle",
+                shipped.len(),
+                reference.len()
+            );
+            for (token, rank) in &reference {
+                assert_eq!(
+                    shipped.get(token),
+                    Some(rank),
+                    "[{name}] rank {rank} token {token:?} missing or misranked"
+                );
+            }
+        }
+    }
+
+    /// The three derived vocabularies must stay exact rank-aligned extensions of
+    /// their base — the property that lets their files hold only the tail. Read
+    /// straight from the oracles, so this holds regardless of which features are on.
+    #[test]
+    fn derived_vocabularies_extend_their_base() {
+        for (derived, base) in [
+            ("llama3", "cl100k_base"),
+            ("glm5", "glm4"),
+            ("p50k_base", "r50k_base"),
+        ] {
+            let derived = oracle(derived);
+            for (token, rank) in oracle(base) {
+                assert_eq!(derived.get(&token), Some(&rank), "token {token:?}");
+            }
+        }
+    }
+}
+//! High-performance pure-Rust BPE tokenizer compatible with OpenAI's tiktoken
+//! and all mainstream LLM tokenizers.
+//!
+//! Supports 20 encodings across 8 providers: OpenAI (`cl100k_base`, `o200k_base`,
+//! `o200k_harmony`, `p50k_base`, `p50k_edit`, `r50k_base`, `gpt2`), Meta (`llama3`,
+//! `llama4`), DeepSeek (`deepseek_v3`, `deepseek_v4`), Alibaba (`qwen2`,
+//! `qwen3_5`), Mistral (`mistral_v3`, `mistral_v15`), Moonshot (`kimi_k2`,
+//! `kimi_k3`), Zhipu (`glm4`, `glm5`), and MiniMax (`minimax_m2`).
+//!
+//! Includes token encoding, decoding, counting, and multi-provider pricing.
+//!
+//! # Quick Start
+//!
+//! ```
+//! // by encoding name
+//! let enc = tiktoken::get_encoding("cl100k_base").unwrap();
+//! let tokens = enc.encode("hello world");
+//! let text = enc.decode_to_string(&tokens).unwrap();
+//! assert_eq!(text, "hello world");
+//!
+//! // by model name
+//! let enc = tiktoken::encoding_for_model("gpt-4o").unwrap();
+//! let count = enc.count("hello world");
+//! assert_eq!(count, 2);
+//! ```
+
+// Whatever a build leaves out, the machinery for it is still compiled and now
+// unreachable: an omitted vocabulary's split pattern and special-token table,
+// and with no vocabulary at all the TKV1 decoder, the merge loop and the piece
+// cache as well. That is what the vocabulary features do, not a defect in
+// them, but rustc cannot tell the difference — 13 warnings for a single
+// vocabulary, 27 for none.
+//
+// Registry dependencies have their lints capped, so this never reached anyone
+// using the published crate; a path or workspace dependency — what every
+// contributor and every monorepo consumer has — saw all of them.
+//
+// Deliberately a blanket allow rather than a `cfg` on each of the twelve
+// items. Gating them individually means guessing a condition per constant, and
+// a condition guessed too narrowly is not a warning but a build failure in
+// some feature combination CI does not enumerate — 2^12 of them exist. The
+// signal given up is code that is dead in *every* configuration, and the full
+// build still catches that; it is the one CI lints strictly and the one nearly
+// everyone ships.
+#![cfg_attr(not(feature = "vocabs-all"), allow(dead_code, unused_imports))]
+
+mod bpe;
+pub mod encoding;
+mod merge;
+mod piece_cache;
+mod pretokenize;
+pub mod pricing;
+mod vocab;
+
+pub use bpe::CoreBpe;
+
+use std::sync::{LazyLock, OnceLock};
+
+#[cfg(feature = "vocab-cl100k_base")]
+static CL100K_BASE: OnceLock<CoreBpe> = OnceLock::new();
+#[cfg(feature = "vocab-o200k_base")]
+static O200K_BASE: OnceLock<CoreBpe> = OnceLock::new();
+#[cfg(feature = "vocab-o200k_base")]
+static O200K_HARMONY: OnceLock<CoreBpe> = OnceLock::new();
+#[cfg(feature = "vocab-p50k_base")]
+static P50K_BASE: OnceLock<CoreBpe> = OnceLock::new();
+#[cfg(feature = "vocab-p50k_base")]
+static P50K_EDIT: OnceLock<CoreBpe> = OnceLock::new();
+#[cfg(feature = "vocab-r50k_base")]
+static R50K_BASE: OnceLock<CoreBpe> = OnceLock::new();
+#[cfg(feature = "vocab-llama3")]
+static LLAMA3: OnceLock<CoreBpe> = OnceLock::new();
+#[cfg(feature = "vocab-deepseek_v3")]
+static DEEPSEEK_V3: OnceLock<CoreBpe> = OnceLock::new();
+#[cfg(feature = "vocab-qwen2")]
+static QWEN2: OnceLock<CoreBpe> = OnceLock::new();
+#[cfg(feature = "vocab-mistral_v3")]
+static MISTRAL_V3: OnceLock<CoreBpe> = OnceLock::new();
+#[cfg(feature = "vocab-kimi_k2")]
+static KIMI_K2: OnceLock<CoreBpe> = OnceLock::new();
+#[cfg(feature = "vocab-kimi_k2")]
+static KIMI_K3: OnceLock<CoreBpe> = OnceLock::new();
+#[cfg(feature = "vocab-glm4")]
+static GLM4: OnceLock<CoreBpe> = OnceLock::new();
+#[cfg(feature = "vocab-glm5")]
+static GLM5: OnceLock<CoreBpe> = OnceLock::new();
+#[cfg(feature = "vocab-minimax_m2")]
+static MINIMAX_M2: OnceLock<CoreBpe> = OnceLock::new();
+#[cfg(feature = "vocab-deepseek_v3")]
+static DEEPSEEK_V4: OnceLock<CoreBpe> = OnceLock::new();
+#[cfg(feature = "vocab-llama4")]
+static LLAMA4: OnceLock<CoreBpe> = OnceLock::new();
+#[cfg(feature = "vocab-qwen3_5")]
+static QWEN3_5: OnceLock<CoreBpe> = OnceLock::new();
+#[cfg(feature = "vocab-mistral_v15")]
+static MISTRAL_V15: OnceLock<CoreBpe> = OnceLock::new();
+
+/// All available encoding names.
+///
+/// Returns the list of encoding names that can be passed to [`get_encoding`].
+/// With the default features that is all 20; a build that names only some
+/// `vocab-*` features lists only those.
+///
+/// # Examples
+///
+/// ```
+/// let names = tiktoken::list_encodings();
+/// assert!(names.contains(&"cl100k_base"));
+/// assert!(names.contains(&"o200k_harmony"));
+/// assert!(names.contains(&"gpt2"));
+/// assert!(names.contains(&"kimi_k3"));
+/// assert!(names.contains(&"glm5"));
+/// assert!(names.contains(&"qwen3_5"));
+/// assert_eq!(names.len(), 20);
+/// ```
+pub fn list_encodings() -> &'static [&'static str] {
+    &ENCODING_NAMES
+}
+
+/// Registry order, filtered to the vocabularies this build carries.
+#[allow(clippy::vec_init_then_push)] // the pushes are cfg-gated
+static ENCODING_NAMES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    #[allow(unused_mut)]
+    let mut names: Vec<&'static str> = Vec::new();
+    #[cfg(feature = "vocab-cl100k_base")]
+    names.push("cl100k_base");
+    #[cfg(feature = "vocab-o200k_base")]
+    names.extend_from_slice(&["o200k_base", "o200k_harmony"]);
+    #[cfg(feature = "vocab-p50k_base")]
+    names.extend_from_slice(&["p50k_base", "p50k_edit"]);
+    #[cfg(feature = "vocab-r50k_base")]
+    names.extend_from_slice(&["r50k_base", "gpt2"]);
+    #[cfg(feature = "vocab-llama3")]
+    names.push("llama3");
+    #[cfg(feature = "vocab-llama4")]
+    names.push("llama4");
+    #[cfg(feature = "vocab-deepseek_v3")]
+    names.extend_from_slice(&["deepseek_v3", "deepseek_v4"]);
+    #[cfg(feature = "vocab-qwen2")]
+    names.push("qwen2");
+    #[cfg(feature = "vocab-qwen3_5")]
+    names.push("qwen3_5");
+    #[cfg(feature = "vocab-mistral_v3")]
+    names.push("mistral_v3");
+    #[cfg(feature = "vocab-mistral_v15")]
+    names.push("mistral_v15");
+    #[cfg(feature = "vocab-kimi_k2")]
+    names.extend_from_slice(&["kimi_k2", "kimi_k3"]);
+    #[cfg(feature = "vocab-glm4")]
+    names.push("glm4");
+    #[cfg(feature = "vocab-glm5")]
+    names.push("glm5");
+    #[cfg(feature = "vocab-minimax_m2")]
+    names.push("minimax_m2");
+    names
+});
+
+/// Get a cached tokenizer by encoding name.
+///
+/// Supported encodings:
+/// - OpenAI: `cl100k_base`, `o200k_base`, `o200k_harmony`, `p50k_base`, `p50k_edit`, `r50k_base`, `gpt2`
+/// - Meta: `llama3`, `llama4`
+/// - DeepSeek: `deepseek_v3`, `deepseek_v4`
+/// - Alibaba: `qwen2`, `qwen3_5`
+/// - Mistral: `mistral_v3`, `mistral_v15`
+/// - Moonshot: `kimi_k2`, `kimi_k3`
+/// - Zhipu: `glm4`, `glm5`
+/// - MiniMax: `minimax_m2`
+///
+/// Note: `gpt2` is a name-level alias for `r50k_base`; both return the same cached instance.
+pub fn get_encoding(name: &str) -> Option<&'static CoreBpe> {
+    match name {
+        #[cfg(feature = "vocab-cl100k_base")]
+        "cl100k_base" => Some(CL100K_BASE.get_or_init(encoding::cl100k_base)),
+        #[cfg(feature = "vocab-o200k_base")]
+        "o200k_base" => Some(O200K_BASE.get_or_init(encoding::o200k_base)),
+        #[cfg(feature = "vocab-o200k_base")]
+        "o200k_harmony" => Some(O200K_HARMONY.get_or_init(encoding::o200k_harmony)),
+        #[cfg(feature = "vocab-p50k_base")]
+        "p50k_base" => Some(P50K_BASE.get_or_init(encoding::p50k_base)),
+        #[cfg(feature = "vocab-p50k_base")]
+        "p50k_edit" => Some(P50K_EDIT.get_or_init(encoding::p50k_edit)),
+        // gpt2 shares r50k_base's cache slot — same vocab, same regex, same special token.
+        #[cfg(feature = "vocab-r50k_base")]
+        "r50k_base" | "gpt2" => Some(R50K_BASE.get_or_init(encoding::r50k_base)),
+        #[cfg(feature = "vocab-llama3")]
+        "llama3" => Some(LLAMA3.get_or_init(encoding::llama3)),
+        #[cfg(feature = "vocab-llama4")]
+        "llama4" => Some(LLAMA4.get_or_init(encoding::llama4)),
+        #[cfg(feature = "vocab-deepseek_v3")]
+        "deepseek_v3" => Some(DEEPSEEK_V3.get_or_init(encoding::deepseek_v3)),
+        #[cfg(feature = "vocab-deepseek_v3")]
+        "deepseek_v4" => Some(DEEPSEEK_V4.get_or_init(encoding::deepseek_v4)),
+        #[cfg(feature = "vocab-qwen2")]
+        "qwen2" => Some(QWEN2.get_or_init(encoding::qwen2)),
+        #[cfg(feature = "vocab-qwen3_5")]
+        "qwen3_5" => Some(QWEN3_5.get_or_init(encoding::qwen3_5)),
+        #[cfg(feature = "vocab-mistral_v3")]
+        "mistral_v3" => Some(MISTRAL_V3.get_or_init(encoding::mistral_v3)),
+        #[cfg(feature = "vocab-mistral_v15")]
+        "mistral_v15" => Some(MISTRAL_V15.get_or_init(encoding::mistral_v15)),
+        #[cfg(feature = "vocab-kimi_k2")]
+        "kimi_k2" => Some(KIMI_K2.get_or_init(encoding::kimi_k2)),
+        #[cfg(feature = "vocab-kimi_k2")]
+        "kimi_k3" => Some(KIMI_K3.get_or_init(encoding::kimi_k3)),
+        #[cfg(feature = "vocab-glm4")]
+        "glm4" => Some(GLM4.get_or_init(encoding::glm4)),
+        #[cfg(feature = "vocab-glm5")]
+        "glm5" => Some(GLM5.get_or_init(encoding::glm5)),
+        #[cfg(feature = "vocab-minimax_m2")]
+        "minimax_m2" => Some(MINIMAX_M2.get_or_init(encoding::minimax_m2)),
+        _ => None,
+    }
+}
+
+/// Get a cached tokenizer by model name.
+///
+/// Supports OpenAI, Meta, DeepSeek, Qwen, Mistral, Moonshot (Kimi), Zhipu (GLM), and MiniMax models.
+/// Maps model name prefixes to their encoding.
+/// Returns `None` for unknown models.
+pub fn encoding_for_model(model: &str) -> Option<&'static CoreBpe> {
+    model_to_encoding(model).and_then(get_encoding)
+}
+
+/// Map a model name to its encoding name.
+///
+/// Returns the encoding name (e.g. `"o200k_base"`) for the given model,
+/// or `None` for unknown models. Supports OpenAI, Meta, DeepSeek, Qwen, Mistral, Moonshot (Kimi), Zhipu (GLM), and MiniMax models.
+pub fn model_to_encoding(model: &str) -> Option<&'static str> {
+    // Strip the `ft:` prefix used for fine-tuned model IDs
+    // (e.g. `ft:gpt-4o:my-org::abc123` → `gpt-4o:my-org::abc123`). Upstream
+    // enumerates a fixed set of `ft:` prefixes; stripping generalizes to any
+    // fine-tunable base model, so this is a superset of upstream behavior.
+    let model = model.strip_prefix("ft:").unwrap_or(model);
+
+    // Exact matches win over prefixes — several legacy ids would otherwise be
+    // captured by a shorter prefix and resolve to the wrong encoding
+    // (`davinci-codex` is p50k_base, not the r50k_base that `davinci` implies;
+    // `code-davinci-edit-001` is p50k_edit, not the p50k_base of `code-davinci`).
+    EXACT_MODEL_ENCODINGS
+        .iter()
+        .find(|&&(m, _)| m == model)
+        .map(|&(_, enc)| enc)
+        .or_else(|| {
+            MODEL_PREFIX_ENCODINGS
+                .iter()
+                .find(|&&(p, _)| model.starts_with(p))
+                .map(|&(_, enc)| enc)
+        })
+}
+
+/// Exact model id → encoding. Mirrors upstream `MODEL_TO_ENCODING`, which the
+/// `model_map` test pins against the reference registry.
+///
+/// `gpt-2` / `gpt2` map to `r50k_base`, the name this crate caches them under;
+/// upstream calls the identical encoding `gpt2` (see [`get_encoding`]).
+const EXACT_MODEL_ENCODINGS: &[(&str, &str)] = &[
+    // chat / reasoning
+    ("gpt-5", "o200k_base"),
+    ("gpt-4.1", "o200k_base"),
+    ("gpt-4o", "o200k_base"),
+    ("gpt-4", "cl100k_base"),
+    ("gpt-3.5", "cl100k_base"),
+    ("gpt-3.5-turbo", "cl100k_base"),
+    ("gpt-35-turbo", "cl100k_base"),
+    ("o1", "o200k_base"),
+    ("o3", "o200k_base"),
+    ("o4-mini", "o200k_base"),
+    // base / legacy completion
+    ("davinci-002", "cl100k_base"),
+    ("babbage-002", "cl100k_base"),
+    ("davinci", "r50k_base"),
+    ("curie", "r50k_base"),
+    ("babbage", "r50k_base"),
+    ("ada", "r50k_base"),
+    ("gpt-2", "r50k_base"),
+    ("gpt2", "r50k_base"),
+    // codex era — these predate the `code-*` prefixes and disagree with them
+    ("davinci-codex", "p50k_base"),
+    ("cushman-codex", "p50k_base"),
+    ("code-davinci-001", "p50k_base"),
+    ("code-davinci-002", "p50k_base"),
+    ("code-cushman-001", "p50k_base"),
+    ("code-cushman-002", "p50k_base"),
+    // edit models (FIM special tokens)
+    ("text-davinci-edit-001", "p50k_edit"),
+    ("code-davinci-edit-001", "p50k_edit"),
+    // instruct-era completion
+    ("text-davinci-003", "p50k_base"),
+    ("text-davinci-002", "p50k_base"),
+    ("text-davinci-001", "r50k_base"),
+    ("text-curie-001", "r50k_base"),
+    ("text-babbage-001", "r50k_base"),
+    ("text-ada-001", "r50k_base"),
+    // DeepSeek API aliases: both point at V4 since 2026-07-24
+    ("deepseek-chat", "deepseek_v4"),
+    ("deepseek-reasoner", "deepseek_v4"),
+    // Moonshot API alias for the current flagship
+    ("kimi-latest", "kimi_k3"),
+    // Mistral's alias points at Large 4 since its 2026-11 release
+    ("mistral-large-latest", "mistral_v15"),
+    // embeddings
+    ("text-embedding-3-small", "cl100k_base"),
+    ("text-embedding-3-large", "cl100k_base"),
+    ("text-embedding-ada-002", "cl100k_base"),
+    // first-generation search / similarity embeddings
+    ("text-search-davinci-doc-001", "r50k_base"),
+    ("text-search-curie-doc-001", "r50k_base"),
+    ("text-search-babbage-doc-001", "r50k_base"),
+    ("text-search-ada-doc-001", "r50k_base"),
+    ("text-similarity-davinci-001", "r50k_base"),
+    ("text-similarity-curie-001", "r50k_base"),
+    ("text-similarity-babbage-001", "r50k_base"),
+    ("text-similarity-ada-001", "r50k_base"),
+    ("code-search-babbage-code-001", "r50k_base"),
+    ("code-search-ada-code-001", "r50k_base"),
+];
+
+/// Model id prefix → encoding, scanned in order: more specific prefixes first,
+/// since `starts_with("gpt-4")` would otherwise swallow `gpt-4o` and `gpt-4.1`.
+///
+/// Upstream pins dated suffixes (`gpt-5-`, `gpt-4.1-`); this table uses the
+/// undated stem (`gpt-5`) so point releases resolve without a code change —
+/// `gpt-5.6-sol` and `gpt-5.4-mini` both reach `o200k_base` here.
+const MODEL_PREFIX_ENCODINGS: &[(&str, &str)] = &[
+    // OpenAI — o200k_harmony must precede o200k_base so `gpt-oss` is not
+    // shadowed, and the o200k block must precede the cl100k `gpt-4` entry.
+    ("gpt-oss", "o200k_harmony"),
+    // GPT-6: OpenAI has not published its tokenizer, and upstream tiktoken has
+    // no mapping for it. Token counts measured on GPT-6 match GPT-5.x's, so it
+    // maps to o200k_base, unconfirmed by OpenAI.
+    ("gpt-6", "o200k_base"),
+    ("o4-mini", "o200k_base"),
+    ("o3", "o200k_base"),
+    ("o1", "o200k_base"),
+    ("chatgpt-4o", "o200k_base"),
+    ("gpt-5", "o200k_base"),
+    ("gpt-4.5", "o200k_base"),
+    ("gpt-4.1", "o200k_base"),
+    ("gpt-4o", "o200k_base"),
+    ("gpt-4", "cl100k_base"),
+    ("gpt-3.5", "cl100k_base"),
+    ("gpt-35-turbo", "cl100k_base"),
+    ("davinci-002", "cl100k_base"),
+    ("babbage-002", "cl100k_base"),
+    ("text-embedding-3", "cl100k_base"),
+    ("text-embedding-ada", "cl100k_base"),
+    ("text-davinci-003", "p50k_base"),
+    ("text-davinci-002", "p50k_base"),
+    ("code-davinci", "p50k_base"),
+    ("code-cushman", "p50k_base"),
+    ("text-davinci-001", "r50k_base"),
+    ("text-curie", "r50k_base"),
+    ("text-babbage", "r50k_base"),
+    ("text-ada", "r50k_base"),
+    ("davinci", "r50k_base"),
+    ("curie", "r50k_base"),
+    ("babbage", "r50k_base"),
+    ("ada", "r50k_base"),
+    ("gpt-2", "r50k_base"),
+    ("gpt2", "r50k_base"),
+    // Meta — Llama 4 has its own vocabulary, so its prefixes precede the
+    // generic `llama-` ones, which cover Llama 3.x. Meta's Muse models share the
+    // Llama 4 vocabulary.
+    ("llama-4", "llama4"),
+    ("llama4", "llama4"),
+    ("Llama-4", "llama4"),
+    ("muse-", "llama4"),
+    ("Muse-", "llama4"),
+    ("llama-", "llama3"),
+    ("llama3", "llama3"),
+    ("Llama-", "llama3"),
+    ("Meta-Llama-", "llama3"),
+    // DeepSeek — v4 prefixes must precede the generation catch-alls
+    ("deepseek-v4", "deepseek_v4"),
+    ("DeepSeek-V4", "deepseek_v4"),
+    // V4.1 Flash (2026-09) keeps the V4 vocabulary and split pattern
+    ("deepseek-flash", "deepseek_v4"),
+    ("deepseek", "deepseek_v3"),
+    ("DeepSeek", "deepseek_v3"),
+    // Moonshot — k3 before k2 is not required (distinct prefixes), but keep
+    // the newest generation first for readability
+    ("kimi-k3", "kimi_k3"),
+    ("Kimi-K3", "kimi_k3"),
+    ("kimi-k2", "kimi_k2"),
+    ("Kimi-K2", "kimi_k2"),
+    ("kimi", "kimi_k3"),
+    ("Kimi", "kimi_k3"),
+    // Zhipu
+    ("glm-5", "glm5"),
+    ("GLM-5", "glm5"),
+    ("glm-4", "glm4"),
+    ("GLM-4", "glm4"),
+    ("glm", "glm4"),
+    ("GLM", "glm4"),
+    // MiniMax — the M2 tokenizer covers the whole M2.x family
+    ("minimax", "minimax_m2"),
+    ("MiniMax", "minimax_m2"),
+    // Alibaba — Qwen 3.5 through 3.8 share a new vocabulary; Qwen 2 through
+    // Qwen 3 keep qwen2's. Qwen 4's tokenizer is unpublished and maps to
+    // qwen3_5, the latest published one, unconfirmed by Alibaba.
+    ("qwen3.5", "qwen3_5"),
+    ("qwen3.6", "qwen3_5"),
+    ("qwen3.7", "qwen3_5"),
+    ("qwen3.8", "qwen3_5"),
+    ("qwen4", "qwen3_5"),
+    ("Qwen3.5", "qwen3_5"),
+    ("Qwen3.6", "qwen3_5"),
+    ("Qwen3.7", "qwen3_5"),
+    ("Qwen3.8", "qwen3_5"),
+    ("Qwen4", "qwen3_5"),
+    ("qwen", "qwen2"),
+    ("Qwen", "qwen2"),
+    // Mistral — Large 4 moved to the 204.8k Tekken v15 vocabulary; other
+    // current models, Small 4 included, keep the 131k one.
+    ("mistral-large-4", "mistral_v15"),
+    ("Mistral-Large-4", "mistral_v15"),
+    ("mistral", "mistral_v3"),
+    ("Mistral", "mistral_v3"),
+    ("mixtral", "mistral_v3"),
+    ("Mixtral", "mistral_v3"),
+    ("codestral", "mistral_v3"),
+    ("Codestral", "mistral_v3"),
+    ("pixtral", "mistral_v3"),
+    ("Pixtral", "mistral_v3"),
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // feature matrix — these hold for any set of `vocab-*` features, and catch a
+    // name gated on one feature whose `get_encoding` arm is gated on another.
+    // The rest of the suite assumes the default (every vocabulary).
+
+    /// Every name the registry knows about, regardless of what this build carries.
+    const EVERY_ENCODING: &[&str] = &[
+        "cl100k_base",
+        "o200k_base",
+        "o200k_harmony",
+        "p50k_base",
+        "p50k_edit",
+        "r50k_base",
+        "gpt2",
+        "llama3",
+        "llama4",
+        "deepseek_v3",
+        "deepseek_v4",
+        "qwen2",
+        "qwen3_5",
+        "mistral_v3",
+        "mistral_v15",
+        "kimi_k2",
+        "kimi_k3",
+        "glm4",
+        "glm5",
+        "minimax_m2",
+    ];
+
+    #[test]
+    fn features_listed_encodings_are_constructible() {
+        for name in list_encodings() {
+            assert!(
+                EVERY_ENCODING.contains(name),
+                "{name} listed but not a known encoding"
+            );
+            assert!(
+                get_encoding(name).is_some(),
+                "{name} listed but get_encoding returned None"
+            );
+        }
+    }
+
+    #[test]
+    fn features_unlisted_encodings_are_absent() {
+        for &name in EVERY_ENCODING {
+            if !list_encodings().contains(&name) {
+                assert!(
+                    get_encoding(name).is_none(),
+                    "{name} is not listed but get_encoding returned Some"
+                );
+            }
+        }
+    }
+
+    // encoding lookup
+
+    #[test]
+    fn test_get_encoding_known() {
+        for name in [
+            "cl100k_base",
+            "o200k_base",
+            "o200k_harmony",
+            "p50k_base",
+            "p50k_edit",
+            "r50k_base",
+            "llama3",
+            "deepseek_v3",
+            "deepseek_v4",
+            "qwen2",
+            "mistral_v3",
+            "kimi_k2",
+            "kimi_k3",
+            "glm4",
+            "glm5",
+            "minimax_m2",
+        ] {
+            assert!(get_encoding(name).is_some(), "missing encoding: {name}");
+        }
+    }
+
+    #[test]
+    fn test_get_encoding_unknown() {
+        assert!(get_encoding("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_o200k_harmony_roundtrip() {
+        let enc = get_encoding("o200k_harmony").unwrap();
+        let text = "hello world, 你好世界 🚀";
+        let decoded = enc.decode(&enc.encode(text));
+        assert_eq!(std::str::from_utf8(&decoded).unwrap(), text);
+    }
+
+    #[test]
+    fn test_o200k_harmony_matches_base_for_plain_text() {
+        // Same merge ranks + regex → ordinary text encodes identically.
+        let base = get_encoding("o200k_base").unwrap();
+        let harmony = get_encoding("o200k_harmony").unwrap();
+        for text in ["hello world", "the quick brown fox", "你好世界 🚀"] {
+            assert_eq!(base.encode(text), harmony.encode(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn test_encoding_for_gpt_oss() {
+        assert_eq!(model_to_encoding("gpt-oss-20b"), Some("o200k_harmony"));
+        assert_eq!(model_to_encoding("gpt-oss-120b"), Some("o200k_harmony"));
+        assert_ne!(model_to_encoding("gpt-oss-20b"), Some("o200k_base"));
+    }
+
+    #[test]
+    fn test_gpt2_in_registry() {
+        assert!(get_encoding("gpt2").is_some());
+        assert!(list_encodings().contains(&"gpt2"));
+    }
+
+    #[test]
+    fn test_gpt2_shares_r50k_base_instance() {
+        // gpt2 and r50k_base hit the same OnceLock slot, so the returned references
+        // point to the exact same CoreBpe instance.
+        let a = get_encoding("gpt2").unwrap() as *const _;
+        let b = get_encoding("r50k_base").unwrap() as *const _;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_gpt2_encodes_like_r50k_base() {
+        let g = get_encoding("gpt2").unwrap();
+        let r = get_encoding("r50k_base").unwrap();
+        for text in [
+            "hello world",
+            "the quick brown fox",
+            "let me think about this",
+        ] {
+            assert_eq!(g.encode(text), r.encode(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn test_encoding_for_gpt2_models() {
+        assert_eq!(model_to_encoding("gpt2"), Some("r50k_base"));
+        assert_eq!(model_to_encoding("gpt-2"), Some("r50k_base"));
+        assert!(encoding_for_model("gpt2").is_some());
+    }
+
+    // model mapping
+
+    #[test]
+    fn test_encoding_for_latest_openai_models() {
+        for model in [
+            "gpt-4o",
+            "gpt-4o-mini",
+            "o1",
+            "o1-mini",
+            "o3",
+            "o3-mini",
+            "o4-mini",
+        ] {
+            let enc = encoding_for_model(model);
+            assert!(enc.is_some(), "no encoding for {model}");
+        }
+    }
+
+    #[test]
+    fn test_encoding_for_gpt4_models() {
+        for model in ["gpt-4", "gpt-4-turbo", "gpt-4-0613"] {
+            assert!(
+                encoding_for_model(model).is_some(),
+                "no encoding for {model}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_encoding_for_gpt35() {
+        assert!(encoding_for_model("gpt-3.5-turbo").is_some());
+    }
+
+    #[test]
+    fn test_encoding_for_gpt5_family() {
+        for m in ["gpt-5", "gpt-5-turbo", "gpt-4.5", "gpt-4.5-preview"] {
+            assert_eq!(model_to_encoding(m), Some("o200k_base"), "{m}");
+        }
+    }
+
+    #[test]
+    fn test_encoding_for_gpt5_point_releases() {
+        // The 2026 GPT-5.x point releases and the Sol/Terra/Luna tier names must
+        // resolve without a per-SKU entry.
+        for m in [
+            "gpt-5.1",
+            "gpt-5.2",
+            "gpt-5.2-pro",
+            "gpt-5.4",
+            "gpt-5.4-mini",
+            "gpt-5.4-nano",
+            "gpt-5.4-pro",
+            "gpt-5.5",
+            "gpt-5.5-pro",
+            "gpt-5.5-cyber",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "gpt-5.3-codex",
+            "gpt-5.3-chat-latest",
+        ] {
+            assert_eq!(model_to_encoding(m), Some("o200k_base"), "{m}");
+        }
+    }
+
+    #[test]
+    fn test_encoding_for_chinese_model_families() {
+        // Moonshot: K2 and K3 share a vocabulary but have distinct special
+        // tables; kimi-latest is the API alias for the current flagship.
+        assert_eq!(model_to_encoding("kimi-k3"), Some("kimi_k3"));
+        assert_eq!(model_to_encoding("kimi-k2-0711-preview"), Some("kimi_k2"));
+        assert_eq!(model_to_encoding("kimi-k2.6"), Some("kimi_k2"));
+        assert_eq!(model_to_encoding("kimi-latest"), Some("kimi_k3"));
+        assert_eq!(model_to_encoding("Kimi-K3"), Some("kimi_k3"));
+        // Zhipu: generation split — 4.x and 5.x are independently trained vocabularies.
+        assert_eq!(model_to_encoding("glm-5.2"), Some("glm5"));
+        assert_eq!(model_to_encoding("glm-5"), Some("glm5"));
+        assert_eq!(model_to_encoding("glm-4.7"), Some("glm4"));
+        assert_eq!(model_to_encoding("glm-4.5-air"), Some("glm4"));
+        assert_eq!(model_to_encoding("GLM-4.6"), Some("glm4"));
+        // MiniMax: one tokenizer across the whole M2 family.
+        assert_eq!(model_to_encoding("minimax-m2.7"), Some("minimax_m2"));
+        assert_eq!(model_to_encoding("MiniMax-M2.1"), Some("minimax_m2"));
+        // DeepSeek: v4 prefix wins over the generation catch-all; the API
+        // aliases point at V4 since 2026-07-24.
+        assert_eq!(model_to_encoding("deepseek-v4-flash"), Some("deepseek_v4"));
+        assert_eq!(model_to_encoding("DeepSeek-V4-Pro"), Some("deepseek_v4"));
+        assert_eq!(model_to_encoding("deepseek-chat"), Some("deepseek_v4"));
+        assert_eq!(model_to_encoding("deepseek-reasoner"), Some("deepseek_v4"));
+        assert_eq!(model_to_encoding("deepseek-v3"), Some("deepseek_v3"));
+        assert_eq!(model_to_encoding("deepseek-r1"), Some("deepseek_v3"));
+    }
+
+    #[test]
+    fn test_kimi_generations_share_vocab_but_not_specials() {
+        let k2 = get_encoding("kimi_k2").unwrap();
+        let k3 = get_encoding("kimi_k3").unwrap();
+        // plain text encodes identically (shared merges)
+        for text in ["hello world", "你好世界", "let x = 42;"] {
+            assert_eq!(k2.encode(text), k3.encode(text), "{text}");
+        }
+        // id 163586 means <|im_end|> in K2 but <|end_of_msg|> in K3
+        assert_eq!(k2.encode_with_special_tokens("<|im_end|>"), vec![163586]);
+        assert_eq!(
+            k3.encode_with_special_tokens("<|end_of_msg|>"),
+            vec![163586]
+        );
+    }
+
+    #[test]
+    fn test_deepseek_v4_extends_v3_specials() {
+        let v4 = get_encoding("deepseek_v4").unwrap();
+        // inherited from V3
+        assert_eq!(v4.encode_with_special_tokens("<｜User｜>"), vec![128803]);
+        // V4-only
+        assert_eq!(v4.encode_with_special_tokens("<think>"), vec![128821]);
+        assert_eq!(
+            v4.encode_with_special_tokens("<|place_holder_mm_span_0021|>"),
+            vec![128847]
+        );
+        // V3 does not know the V4-only ids
+        let v3 = get_encoding("deepseek_v3").unwrap();
+        assert_ne!(v3.encode_with_special_tokens("<think>"), vec![128821]);
+    }
+
+    #[test]
+    fn test_encoding_for_legacy_exact_ids() {
+        // Regression: a bare prefix scan routed these to the wrong encoding —
+        // `davinci-codex` matched `davinci` (r50k_base) and `code-davinci-edit-001`
+        // matched `code-davinci` (p50k_base). Exact ids must win over prefixes.
+        assert_eq!(model_to_encoding("davinci-codex"), Some("p50k_base"));
+        assert_eq!(model_to_encoding("cushman-codex"), Some("p50k_base"));
+        assert_eq!(
+            model_to_encoding("text-davinci-edit-001"),
+            Some("p50k_edit")
+        );
+        assert_eq!(
+            model_to_encoding("code-davinci-edit-001"),
+            Some("p50k_edit")
+        );
+    }
+
+    #[test]
+    fn test_encoding_for_first_gen_embedding_models() {
+        // The `text-search-*` / `text-similarity-*` / `code-search-*` families
+        // have no prefix rule and must resolve through the exact table.
+        for m in [
+            "text-search-davinci-doc-001",
+            "text-search-curie-doc-001",
+            "text-search-babbage-doc-001",
+            "text-search-ada-doc-001",
+            "text-similarity-davinci-001",
+            "text-similarity-curie-001",
+            "text-similarity-babbage-001",
+            "text-similarity-ada-001",
+            "code-search-babbage-code-001",
+            "code-search-ada-code-001",
+        ] {
+            assert_eq!(model_to_encoding(m), Some("r50k_base"), "{m}");
+        }
+    }
+
+    #[test]
+    fn test_encoding_for_davinci_babbage_002() {
+        // Regression: these were incorrectly routed to r50k_base by
+        // starts_with("davinci")/("babbage"). They use cl100k_base upstream.
+        assert_eq!(model_to_encoding("davinci-002"), Some("cl100k_base"));
+        assert_eq!(model_to_encoding("babbage-002"), Some("cl100k_base"));
+    }
+
+    #[test]
+    fn test_encoding_for_finetuned_models() {
+        assert_eq!(
+            model_to_encoding("ft:gpt-4o:my-org::abc123"),
+            Some("o200k_base")
+        );
+        assert_eq!(model_to_encoding("ft:gpt-4:org::xyz"), Some("cl100k_base"));
+        assert_eq!(
+            model_to_encoding("ft:gpt-3.5-turbo:org::xyz"),
+            Some("cl100k_base")
+        );
+    }
+
+    #[test]
+    fn test_encoding_for_azure_gpt35() {
+        // Azure uses `gpt-35-turbo` instead of `gpt-3.5-turbo`.
+        assert_eq!(model_to_encoding("gpt-35-turbo"), Some("cl100k_base"));
+    }
+
+    #[test]
+    fn test_encoding_for_model_unknown() {
+        assert!(encoding_for_model("unknown-model").is_none());
+    }
+
+    // encode/decode roundtrip
+
+    #[test]
+    fn test_cl100k_roundtrip() {
+        let enc = get_encoding("cl100k_base").unwrap();
+        let text = "hello world";
+        let decoded = enc.decode(&enc.encode(text));
+        assert_eq!(std::str::from_utf8(&decoded).unwrap(), text);
+    }
+
+    #[test]
+    fn test_o200k_roundtrip() {
+        let enc = get_encoding("o200k_base").unwrap();
+        let text = "hello world, 你好世界 🚀";
+        let decoded = enc.decode(&enc.encode(text));
+        assert_eq!(std::str::from_utf8(&decoded).unwrap(), text);
+    }
+
+    #[test]
+    fn test_p50k_roundtrip() {
+        let enc = get_encoding("p50k_base").unwrap();
+        let decoded = enc.decode(&enc.encode("hello world"));
+        assert_eq!(std::str::from_utf8(&decoded).unwrap(), "hello world");
+    }
+
+    #[test]
+    fn test_r50k_roundtrip() {
+        let enc = get_encoding("r50k_base").unwrap();
+        let decoded = enc.decode(&enc.encode("hello world"));
+        assert_eq!(std::str::from_utf8(&decoded).unwrap(), "hello world");
+    }
+
+    #[test]
+    fn test_unicode_roundtrip() {
+        let enc = get_encoding("cl100k_base").unwrap();
+        let text = "café résumé naïve über 日本語 한국어 العربية";
+        let decoded = enc.decode(&enc.encode(text));
+        assert_eq!(std::str::from_utf8(&decoded).unwrap(), text);
+    }
+
+    // count
+
+    #[test]
+    fn test_count_equals_encode_len() {
+        let enc = get_encoding("cl100k_base").unwrap();
+        for text in [
+            "hello world",
+            "The quick brown fox.",
+            "你好世界",
+            "",
+            "a",
+            "  \n\n  ",
+        ] {
+            assert_eq!(
+                enc.count(text),
+                enc.encode(text).len(),
+                "mismatch for {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_o200k_count_equals_encode_len() {
+        let enc = get_encoding("o200k_base").unwrap();
+        for text in ["hello world", "OpenAI GPT-4o is great", ""] {
+            assert_eq!(
+                enc.count(text),
+                enc.encode(text).len(),
+                "mismatch for {text:?}"
+            );
+        }
+    }
+
+    // special tokens
+
+    #[test]
+    fn test_count_with_special_tokens_cl100k() {
+        let enc = get_encoding("cl100k_base").unwrap();
+        let text = "hello<|endoftext|>world";
+        assert_eq!(
+            enc.count_with_special_tokens(text),
+            enc.encode_with_special_tokens(text).len()
+        );
+    }
+
+    #[test]
+    fn test_special_tokens_cl100k() {
+        let enc = get_encoding("cl100k_base").unwrap();
+        let text = "hello<|endoftext|>world";
+        let with = enc.encode_with_special_tokens(text);
+        assert!(with.contains(&100257));
+        let without = enc.encode(text);
+        assert!(!without.contains(&100257));
+    }
+
+    // edge cases
+
+    #[test]
+    fn test_empty_input() {
+        let enc = get_encoding("cl100k_base").unwrap();
+        assert!(enc.encode("").is_empty());
+        assert_eq!(enc.count(""), 0);
+    }
+
+    #[test]
+    fn test_cached_instance_is_same() {
+        let a = get_encoding("cl100k_base").unwrap() as *const CoreBpe;
+        let b = get_encoding("cl100k_base").unwrap() as *const CoreBpe;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_long_text_roundtrip() {
+        let enc = get_encoding("cl100k_base").unwrap();
+        let text = "word ".repeat(10000);
+        let decoded = enc.decode(&enc.encode(&text));
+        assert_eq!(std::str::from_utf8(&decoded).unwrap(), text);
+    }
+
+    #[test]
+    fn test_whitespace_roundtrip() {
+        let enc = get_encoding("cl100k_base").unwrap();
+        for text in [" ", "  ", "\n", "\t", "  \n  \n  "] {
+            let decoded = enc.decode(&enc.encode(text));
+            assert_eq!(
+                std::str::from_utf8(&decoded).unwrap(),
+                text,
+                "failed for {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_single_characters() {
+        let enc = get_encoding("cl100k_base").unwrap();
+        for ch in ['a', 'Z', '0', '!', '@', '#'] {
+            let text = ch.to_string();
+            let decoded = enc.decode(&enc.encode(&text));
+            assert_eq!(std::str::from_utf8(&decoded).unwrap(), text);
+        }
+    }
+
+    #[test]
+    fn test_encoding_deterministic() {
+        let enc = get_encoding("cl100k_base").unwrap();
+        let text = "deterministic check";
+        assert_eq!(enc.encode(text), enc.encode(text));
+    }
+
+    // exact token sequence tests verified against Python tiktoken 0.12.0
+    #[test]
+    fn test_exact_tokens_hello_world() {
+        let enc = get_encoding("cl100k_base").unwrap();
+        assert_eq!(enc.encode("hello world"), vec![15339, 1917]);
+    }
+
+    #[test]
+    fn test_exact_tokens_spaces_before_word() {
+        let enc = get_encoding("cl100k_base").unwrap();
+        assert_eq!(enc.encode("  hello"), vec![220, 24748]);
+    }
+
+    #[test]
+    fn test_exact_tokens_three_spaces() {
+        let enc = get_encoding("cl100k_base").unwrap();
+        assert_eq!(enc.encode("   hello"), vec![256, 24748]);
+    }
+
+    #[test]
+    fn test_exact_tokens_trailing_spaces() {
+        let enc = get_encoding("cl100k_base").unwrap();
+        assert_eq!(enc.encode("hello   "), vec![15339, 262]);
+    }
+
+    #[test]
+    fn test_exact_tokens_mixed_whitespace() {
+        let enc = get_encoding("cl100k_base").unwrap();
+        assert_eq!(enc.encode("hello\t  world"), vec![15339, 3762, 1917]);
+    }
+
+    #[test]
+    fn test_exact_tokens_unicode() {
+        let enc = get_encoding("cl100k_base").unwrap();
+        assert_eq!(enc.encode("你好世界"), vec![57668, 53901, 3574, 244, 98220]);
+    }
+
+    #[test]
+    fn test_exact_tokens_empty() {
+        let enc = get_encoding("cl100k_base").unwrap();
+        assert_eq!(enc.encode(""), Vec::<u32>::new());
+    }
+
+    // decode_to_string
+
+    #[test]
+    fn test_decode_to_string_valid() {
+        let enc = get_encoding("cl100k_base").unwrap();
+        let tokens = enc.encode("hello world");
+        assert_eq!(enc.decode_to_string(&tokens).unwrap(), "hello world");
+    }
+
+    #[test]
+    fn test_decode_to_string_empty() {
+        let enc = get_encoding("cl100k_base").unwrap();
+        assert_eq!(enc.decode_to_string(&[]).unwrap(), "");
+    }
+
+    #[test]
+    fn test_decode_to_string_unicode() {
+        let enc = get_encoding("cl100k_base").unwrap();
+        let text = "日本語テスト 🎉";
+        let tokens = enc.encode(text);
+        assert_eq!(enc.decode_to_string(&tokens).unwrap(), text);
+    }
+
+    // model_to_encoding (now public)
+
+    #[test]
+    fn test_model_to_encoding_o200k() {
+        for model in [
+            "gpt-4o",
+            "gpt-4.1",
+            "gpt-4.1-mini",
+            "gpt-4.1-nano",
+            "o1",
+            "o3",
+            "o3-pro",
+            "o4-mini",
+            "chatgpt-4o",
+        ] {
+            assert_eq!(
+                model_to_encoding(model),
+                Some("o200k_base"),
+                "wrong encoding for {model}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_model_to_encoding_cl100k() {
+        for model in [
+            "gpt-4",
+            "gpt-3.5-turbo",
+            "text-embedding-ada-002",
+            "text-embedding-3-small",
+        ] {
+            assert_eq!(
+                model_to_encoding(model),
+                Some("cl100k_base"),
+                "wrong encoding for {model}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_model_to_encoding_p50k() {
+        for model in [
+            "text-davinci-003",
+            "text-davinci-002",
+            "code-davinci-002",
+            "code-cushman-001",
+        ] {
+            assert_eq!(
+                model_to_encoding(model),
+                Some("p50k_base"),
+                "wrong encoding for {model}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_model_to_encoding_r50k() {
+        for model in ["text-davinci-001", "davinci", "curie", "babbage", "ada"] {
+            assert_eq!(
+                model_to_encoding(model),
+                Some("r50k_base"),
+                "wrong encoding for {model}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_model_to_encoding_llama3() {
+        for model in ["llama-3.1-70b", "llama3-8b", "Meta-Llama-3.1-8B"] {
+            assert_eq!(
+                model_to_encoding(model),
+                Some("llama3"),
+                "wrong encoding for {model}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_model_to_encoding_llama4() {
+        for model in [
+            "llama-4-scout",
+            "llama-4-maverick",
+            "llama4-scout",
+            "Llama-4-Scout-17B-16E-Instruct",
+            "muse-spark-open",
+            "Muse-Glimmer-30B",
+        ] {
+            assert_eq!(
+                model_to_encoding(model),
+                Some("llama4"),
+                "wrong encoding for {model}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_model_to_encoding_qwen3_5() {
+        for model in [
+            "qwen3.5-plus",
+            "qwen3.8-max",
+            "qwen3.8-flash",
+            "Qwen3.8-27B",
+            "qwen4-max",
+        ] {
+            assert_eq!(
+                model_to_encoding(model),
+                Some("qwen3_5"),
+                "wrong encoding for {model}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_model_to_encoding_new_2026_11_ids() {
+        assert_eq!(model_to_encoding("gpt-6-sol"), Some("o200k_base"));
+        assert_eq!(model_to_encoding("gpt-6.2-astra"), Some("o200k_base"));
+        assert_eq!(model_to_encoding("deepseek-flash"), Some("deepseek_v4"));
+        assert_eq!(model_to_encoding("mistral-large-4"), Some("mistral_v15"));
+        assert_eq!(
+            model_to_encoding("mistral-large-latest"),
+            Some("mistral_v15")
+        );
+        assert_eq!(
+            model_to_encoding("Mistral-Large-4-1T-A52B"),
+            Some("mistral_v15")
+        );
+        // Large 3 and Small 4 keep the 131k vocabulary
+        assert_eq!(model_to_encoding("mistral-large-2512"), Some("mistral_v3"));
+        assert_eq!(model_to_encoding("mistral-small-2603"), Some("mistral_v3"));
+    }
+
+    #[test]
+    fn test_model_to_encoding_deepseek() {
+        // pre-V4 models keep the V3 encoding
+        for model in ["deepseek-v3", "DeepSeek-R1"] {
+            assert_eq!(
+                model_to_encoding(model),
+                Some("deepseek_v3"),
+                "wrong encoding for {model}"
+            );
+        }
+        // the API alias moved to V4 on 2026-07-24
+        assert_eq!(model_to_encoding("deepseek-chat"), Some("deepseek_v4"));
+    }
+
+    #[test]
+    fn test_model_to_encoding_qwen() {
+        for model in [
+            "qwen2.5-72b",
+            "Qwen2.5-7B",
+            "qwen3-32b",
+            "qwen3-max",
+            "qwen3-coder",
+        ] {
+            assert_eq!(
+                model_to_encoding(model),
+                Some("qwen2"),
+                "wrong encoding for {model}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_model_to_encoding_mistral() {
+        for model in [
+            "mistral-small-latest",
+            "Mistral-Small-24B",
+            "mixtral-8x7b",
+            "codestral",
+            "Codestral",
+            "pixtral-large",
+            "Pixtral-Large",
+        ] {
+            assert_eq!(
+                model_to_encoding(model),
+                Some("mistral_v3"),
+                "wrong encoding for {model}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_model_to_encoding_unknown() {
+        assert_eq!(model_to_encoding("unknown-model"), None);
+    }
+
+    // vocab_size / num_special_tokens
+
+    #[test]
+    fn test_vocab_sizes() {
+        let cases: &[(&str, usize)] = &[
+            ("cl100k_base", 100256),
+            ("o200k_base", 199998),
+            ("p50k_base", 50280),
+            ("r50k_base", 50256),
+            ("llama3", 128000),
+            ("deepseek_v3", 128000),
+            ("qwen2", 151643),
+            ("mistral_v3", 131072),
+        ];
+        for &(name, expected) in cases {
+            let enc = get_encoding(name).unwrap();
+            assert_eq!(enc.vocab_size(), expected, "vocab_size mismatch for {name}");
+        }
+    }
+
+    #[test]
+    fn test_special_token_counts() {
+        let enc = get_encoding("cl100k_base").unwrap();
+        assert_eq!(enc.num_special_tokens(), 5);
+
+        let enc = get_encoding("p50k_edit").unwrap();
+        assert_eq!(enc.num_special_tokens(), 4); // endoftext + 3 fim tokens
+
+        let enc = get_encoding("llama3").unwrap();
+        assert_eq!(enc.num_special_tokens(), 8);
+    }
+
+    // regression: gpt-4o must resolve to o200k, not cl100k (prefix order matters)
+    #[test]
+    fn test_model_to_encoding_gpt4o_vs_gpt4() {
+        assert_eq!(model_to_encoding("gpt-4o"), Some("o200k_base"));
+        assert_eq!(model_to_encoding("gpt-4o-mini"), Some("o200k_base"));
+        assert_eq!(model_to_encoding("gpt-4"), Some("cl100k_base"));
+        assert_eq!(model_to_encoding("gpt-4-turbo"), Some("cl100k_base"));
+    }
+
+    // new encoding edge cases
+
+    #[test]
+    fn test_llama3_special_tokens() {
+        let enc = get_encoding("llama3").unwrap();
+        let text = "hello<|begin_of_text|>world";
+        let with = enc.encode_with_special_tokens(text);
+        assert!(with.contains(&128000));
+        let without = enc.encode(text);
+        assert!(!without.contains(&128000));
+    }
+
+    #[test]
+    fn test_deepseek_special_tokens() {
+        let enc = get_encoding("deepseek_v3").unwrap();
+        let text = "hello<|EOT|>world";
+        let with = enc.encode_with_special_tokens(text);
+        assert!(with.contains(&128805));
+    }
+
+    #[test]
+    fn test_qwen2_special_tokens() {
+        let enc = get_encoding("qwen2").unwrap();
+        let text = "hello<|endoftext|>world";
+        let with = enc.encode_with_special_tokens(text);
+        assert!(with.contains(&151643));
+    }
+
+    #[test]
+    fn test_mistral_special_tokens() {
+        let enc = get_encoding("mistral_v3").unwrap();
+        let text = "hello[INST]world";
+        let with = enc.encode_with_special_tokens(text);
+        assert!(with.contains(&3));
+    }
+
+    #[test]
+    fn test_deepseek_zwj_roundtrip() {
+        let enc = get_encoding("deepseek_v3").unwrap();
+        // ZWJ emoji sequence
+        let text = "\u{200d}\u{200d}test";
+        let decoded = enc.decode(&enc.encode(text));
+        assert_eq!(std::str::from_utf8(&decoded).unwrap(), text);
+    }
+
+    #[test]
+    fn test_all_encodings_empty_roundtrip() {
+        for name in [
+            "cl100k_base",
+            "o200k_base",
+            "p50k_base",
+            "p50k_edit",
+            "r50k_base",
+            "llama3",
+            "deepseek_v3",
+            "qwen2",
+            "mistral_v3",
+        ] {
+            let enc = get_encoding(name).unwrap();
+            assert!(enc.encode("").is_empty(), "non-empty for {name}");
+            assert_eq!(enc.count(""), 0, "non-zero count for {name}");
+            assert!(enc.decode(&[]).is_empty(), "non-empty decode for {name}");
+        }
+    }
+
+    #[test]
+    fn test_all_encodings_single_byte_roundtrip() {
+        for name in [
+            "cl100k_base",
+            "o200k_base",
+            "p50k_base",
+            "r50k_base",
+            "llama3",
+            "deepseek_v3",
+            "qwen2",
+            "mistral_v3",
+        ] {
+            let enc = get_encoding(name).unwrap();
+            for b in 0u8..=127 {
+                let text = String::from(b as char);
+                let decoded = enc.decode(&enc.encode(&text));
+                assert_eq!(
+                    &decoded[..],
+                    text.as_bytes(),
+                    "byte {b} roundtrip failed for {name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_count_with_special_tokens_equals_encode_with_special_tokens() {
+        for name in ["cl100k_base", "o200k_base", "llama3", "qwen2"] {
+            let enc = get_encoding(name).unwrap();
+            let text = "hello world test text";
+            assert_eq!(
+                enc.count_with_special_tokens(text),
+                enc.encode_with_special_tokens(text).len(),
+                "mismatch for {name}"
+            );
+        }
+    }
+
+    // count_with_special_tokens across all encodings with their specific tokens
+
+    #[test]
+    fn test_count_with_special_tokens_all_encodings() {
+        let cases: &[(&str, &str)] = &[
+            ("cl100k_base", "<|endoftext|>"),
+            ("o200k_base", "<|endoftext|>"),
+            ("p50k_edit", "<|fim_prefix|>"),
+            ("llama3", "<|begin_of_text|>"),
+            ("deepseek_v3", "<|EOT|>"),
+            ("qwen2", "<|endoftext|>"),
+            ("mistral_v3", "[INST]"),
+        ];
+        for &(name, special) in cases {
+            let enc = get_encoding(name).unwrap();
+            let text = format!("hello{special}world");
+            assert_eq!(
+                enc.count_with_special_tokens(&text),
+                enc.encode_with_special_tokens(&text).len(),
+                "count_with_special_tokens mismatch for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_count_with_special_tokens_adjacent() {
+        let enc = get_encoding("cl100k_base").unwrap();
+        let text = "<|endoftext|><|endoftext|>";
+        assert_eq!(
+            enc.count_with_special_tokens(text),
+            enc.encode_with_special_tokens(text).len()
+        );
+    }
+
+    // special token roundtrips for new encodings
+
+    #[test]
+    fn test_llama3_special_token_roundtrip() {
+        let enc = get_encoding("llama3").unwrap();
+        let text = "start<|begin_of_text|>middle<|eot_id|>end";
+        let tokens = enc.encode_with_special_tokens(text);
+        assert_eq!(enc.decode_to_string(&tokens).unwrap(), text);
+    }
+
+    #[test]
+    fn test_qwen2_special_token_roundtrip() {
+        let enc = get_encoding("qwen2").unwrap();
+        let text = "<|im_start|>user\nhello<|im_end|>";
+        let tokens = enc.encode_with_special_tokens(text);
+        assert_eq!(enc.decode_to_string(&tokens).unwrap(), text);
+    }
+
+    #[test]
+    fn test_mistral_special_token_roundtrip() {
+        let enc = get_encoding("mistral_v3").unwrap();
+        let text = "[INST]hello[/INST]";
+        let tokens = enc.encode_with_special_tokens(text);
+        assert_eq!(enc.decode_to_string(&tokens).unwrap(), text);
+    }
+
+    // decode unknown token id: should silently skip
+    #[test]
+    fn test_decode_unknown_token_id() {
+        let enc = get_encoding("cl100k_base").unwrap();
+        let result = enc.decode(&[u32::MAX]);
+        assert!(
+            result.is_empty(),
+            "unknown token should be silently skipped"
+        );
+    }
+
+    #[test]
+    fn test_decode_mixed_known_and_unknown() {
+        let enc = get_encoding("cl100k_base").unwrap();
+        let tokens = enc.encode("hello");
+        let mut with_unknown = tokens.clone();
+        with_unknown.push(u32::MAX);
+        with_unknown.extend_from_slice(&enc.encode(" world"));
+        let decoded = enc.decode_to_string(&with_unknown).unwrap();
+        assert_eq!(decoded, "hello world");
+    }
+
+    // p50k_edit roundtrip (uses different special tokens from p50k_base)
+
+    #[test]
+    fn test_p50k_edit_roundtrip() {
+        let enc = get_encoding("p50k_edit").unwrap();
+        let text = "hello world, p50k_edit encoding";
+        let decoded = enc.decode(&enc.encode(text));
+        assert_eq!(std::str::from_utf8(&decoded).unwrap(), text);
+    }
+
+    #[test]
+    fn test_p50k_edit_special_tokens() {
+        let enc = get_encoding("p50k_edit").unwrap();
+        let text = "prefix<|fim_prefix|>middle<|fim_middle|>suffix<|fim_suffix|>end";
+        let tokens = enc.encode_with_special_tokens(text);
+        assert!(tokens.contains(&50281)); // <|fim_prefix|>
+        assert!(tokens.contains(&50282)); // <|fim_middle|>
+        assert!(tokens.contains(&50283)); // <|fim_suffix|>
+    }
+
+    // o200k special tokens
+
+    #[test]
+    fn test_o200k_special_tokens() {
+        let enc = get_encoding("o200k_base").unwrap();
+        let text = "hello<|endoftext|>world";
+        let with = enc.encode_with_special_tokens(text);
+        assert!(with.contains(&199999)); // o200k endoftext id
+        let without = enc.encode(text);
+        assert!(!without.contains(&199999));
+    }
+
+    // decode special tokens
+
+    #[test]
+    fn test_decode_special_token_cl100k() {
+        let enc = get_encoding("cl100k_base").unwrap();
+        let decoded = enc.decode(&[100257]); // <|endoftext|>
+        assert_eq!(&decoded, b"<|endoftext|>");
+    }
+
+    #[test]
+    fn test_decode_special_token_roundtrip() {
+        let enc = get_encoding("cl100k_base").unwrap();
+        let text = "hello<|endoftext|>world";
+        let tokens = enc.encode_with_special_tokens(text);
+        let decoded = enc.decode_to_string(&tokens).unwrap();
+        assert_eq!(decoded, text);
+    }
+
+    // new encoding roundtrips
+
+    #[test]
+    fn test_llama3_roundtrip() {
+        let enc = get_encoding("llama3").unwrap();
+        let text = "Hello, 世界! 🚀 test";
+        let decoded = enc.decode(&enc.encode(text));
+        assert_eq!(std::str::from_utf8(&decoded).unwrap(), text);
+    }
+
+    #[test]
+    fn test_deepseek_roundtrip() {
+        let enc = get_encoding("deepseek_v3").unwrap();
+        let text = "Hello, 世界! 🚀 test";
+        let decoded = enc.decode(&enc.encode(text));
+        assert_eq!(std::str::from_utf8(&decoded).unwrap(), text);
+    }
+
+    #[test]
+    fn test_qwen2_roundtrip() {
+        let enc = get_encoding("qwen2").unwrap();
+        let text = "Hello, 世界! 🚀 test";
+        let decoded = enc.decode(&enc.encode(text));
+        assert_eq!(std::str::from_utf8(&decoded).unwrap(), text);
+    }
+
+    #[test]
+    fn test_mistral_roundtrip() {
+        let enc = get_encoding("mistral_v3").unwrap();
+        let text = "Hello, 世界! 🚀 test";
+        let decoded = enc.decode(&enc.encode(text));
+        assert_eq!(std::str::from_utf8(&decoded).unwrap(), text);
+    }
+
+    // count consistency across all encodings
+
+    #[test]
+    fn test_count_consistency_all_encodings() {
+        let text = "Hello, 世界! This is a test with mixed content 🚀 and numbers 12345.";
+        for name in [
+            "cl100k_base",
+            "o200k_base",
+            "p50k_base",
+            "p50k_edit",
+            "r50k_base",
+            "llama3",
+            "deepseek_v3",
+            "qwen2",
+            "mistral_v3",
+        ] {
+            let enc = get_encoding(name).unwrap();
+            assert_eq!(
+                enc.count(text),
+                enc.encode(text).len(),
+                "count != encode().len() for {name}"
+            );
+        }
+    }
+}
+//! Heap-accelerated BPE merge algorithm.
+//!
+//! Implements byte-pair encoding merging using a min-heap (`BinaryHeap<Reverse>`)
+//! combined with a doubly-linked list for O(n log n) complexity. The heap tracks
+//! candidate merges by rank; the linked list enables O(1) neighbor updates when
+//! a merge removes a position. Lazy deletion handles stale heap entries.
+
+use crate::vocab::Vocab;
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
+
+/// Pieces up to this byte length use the stack-allocated linear-scan merge
+/// (`byte_pair_merge_small`) instead of the heap-based algorithm. After
+/// pre-tokenization the overwhelming majority of pieces are short (word-sized),
+/// where the heap's allocation + bookkeeping overhead dominates. The heap
+/// algorithm only pays off on long, rarely-occurring pieces.
+const LINEAR_THRESHOLD: usize = 32;
+
+/// BPE merge: find the optimal partition of `piece` into sub-tokens.
+///
+/// Returns a list of split points (byte offsets into `piece`), e.g.
+/// `[0, 3, 5]` means the piece is split into `piece[0..3]` and `piece[3..5]`.
+///
+/// Uses a min-heap + doubly-linked list for O(n log n) merging,
+/// compared to the v2 algorithm's O(n * m) linear scan.
+pub fn byte_pair_merge(piece: &[u8], vocab: &Vocab) -> Vec<usize> {
+    let n = piece.len();
+    debug_assert!(
+        n <= u32::MAX as usize,
+        "piece length {} exceeds u32 index range",
+        n
+    );
+
+    if n == 0 {
+        return vec![0];
+    }
+
+    // fast path: 1 byte
+    if n == 1 {
+        return vec![0, 1];
+    }
+
+    // fast path: 2 bytes
+    if n == 2 {
+        if vocab.contains_key(piece) {
+            return vec![0, 2];
+        }
+        return vec![0, 1, 2];
+    }
+
+    // short pieces: linear scan with stack-allocated scratch (no heap, no Vec
+    // bookkeeping). This is the common case after pre-tokenization.
+    if n <= LINEAR_THRESHOLD {
+        let mut parts = [0u32; LINEAR_THRESHOLD + 1];
+        let plen = byte_pair_merge_small(piece, vocab, &mut parts);
+        return parts[..plen].iter().map(|&p| p as usize).collect();
+    }
+
+    // doubly-linked list over byte positions 0..n
+    // next[i] = next active position after i
+    // prev[i] = previous active position before i
+    let mut next: Vec<u32> = (1..=n as u32).collect();
+    let mut prev: Vec<u32> = (0..n).map(|i| i.saturating_sub(1) as u32).collect();
+
+    // rank_at[i] = rank of the pair (i, next[i]), or u32::MAX if not mergeable
+    let mut rank_at: Vec<u32> = vec![u32::MAX; n];
+
+    // min-heap: (rank, position)
+    let mut heap: BinaryHeap<Reverse<(u32, u32)>> = BinaryHeap::new();
+
+    // initialize: compute ranks for all adjacent pairs
+    for i in 0..n - 1 {
+        if let Some(rank) = vocab.get_pair(piece[i], piece[i + 1]) {
+            rank_at[i] = rank;
+            heap.push(Reverse((rank, i as u32)));
+        }
+    }
+
+    let mut active_count = n;
+
+    while let Some(Reverse((rank, pos))) = heap.pop() {
+        let pos = pos as usize;
+
+        // lazy deletion: skip if this entry is stale
+        if rank_at[pos] != rank {
+            continue;
+        }
+
+        let next_pos = next[pos] as usize;
+        if next_pos >= n {
+            continue;
+        }
+
+        if active_count <= 1 {
+            break;
+        }
+
+        // merge: remove next_pos from the linked list
+        let after = next[next_pos] as usize;
+        next[pos] = after as u32;
+        if after < n {
+            prev[after] = pos as u32;
+        }
+        rank_at[next_pos] = u32::MAX; // mark deleted
+        active_count -= 1;
+
+        // recompute rank for the merged pair at pos
+        // pair at pos is now: piece[pos..after] + piece[after..next[after]]
+        rank_at[pos] = u32::MAX;
+        if after < n {
+            let after_next = next[after] as usize;
+            if after_next <= n
+                && let Some(new_rank) = vocab.get(&piece[pos..after_next])
+            {
+                rank_at[pos] = new_rank;
+                heap.push(Reverse((new_rank, pos as u32)));
+            }
+        }
+
+        // recompute rank for predecessor
+        if pos > 0 {
+            let prev_pos = prev[pos] as usize;
+            rank_at[prev_pos] = u32::MAX;
+            let pos_next = next[pos] as usize;
+            debug_assert!(pos_next <= n);
+            if pos_next > pos
+                && let Some(new_rank) = vocab.get(&piece[prev_pos..pos_next])
+            {
+                rank_at[prev_pos] = new_rank;
+                heap.push(Reverse((new_rank, prev_pos as u32)));
+            }
+        }
+    }
+
+    // collect result: walk the linked list
+    let mut parts = Vec::with_capacity(active_count + 1);
+    let mut i = 0usize;
+    while i < n {
+        parts.push(i);
+        i = next[i] as usize;
+    }
+    parts.push(n);
+    parts
+}
+
+/// Linear-scan BPE merge for short pieces (`n <= LINEAR_THRESHOLD`).
+///
+/// Equivalent to the heap-based [`byte_pair_merge`] but keeps all scratch state
+/// in fixed-size stack arrays, avoiding the heap allocation and three `Vec`s the
+/// general algorithm needs. The logic mirrors the v2 reference implementation
+/// (find global min rank, merge, recompute the two affected neighbor ranks),
+/// which is O(n*m) but with a tiny constant factor that beats the heap on the
+/// short pieces that dominate real input.
+///
+/// Caller guarantees `3 <= n <= LINEAR_THRESHOLD`.
+///
+/// Fills `parts` with the sub-token boundary offsets and returns how many of
+/// them are valid, so callers that only need the token *count* never allocate.
+#[allow(clippy::needless_range_loop)] // index loops mirror the Viterbi reference; clearer than iterators
+fn byte_pair_merge_small(
+    piece: &[u8],
+    vocab: &Vocab,
+    parts: &mut [u32; LINEAR_THRESHOLD + 1],
+) -> usize {
+    let n = piece.len();
+
+    // parts[i] = byte offset of the i-th sub-token boundary; plen entries valid.
+    // ranks[i] = rank of the pair (parts[i], parts[i+2]) or u32::MAX if unmergeable.
+    let mut ranks = [u32::MAX; LINEAR_THRESHOLD + 1];
+    for i in 0..=n {
+        parts[i] = i as u32;
+    }
+    let mut plen = n + 1;
+
+    // initialize ranks for all adjacent single-byte pairs
+    for i in 0..n.saturating_sub(1) {
+        ranks[i] = vocab.get_pair(piece[i], piece[i + 1]).unwrap_or(u32::MAX);
+    }
+
+    loop {
+        if plen <= 2 {
+            break;
+        }
+
+        // find the lowest-rank mergeable pair
+        let mut min_rank = u32::MAX;
+        let mut min_idx = 0;
+        for i in 0..plen - 1 {
+            if ranks[i] < min_rank {
+                min_rank = ranks[i];
+                min_idx = i;
+            }
+        }
+        if min_rank == u32::MAX {
+            break;
+        }
+
+        // merge: drop boundary parts[min_idx+1] (and its rank slot)
+        for j in min_idx + 1..plen - 1 {
+            parts[j] = parts[j + 1];
+            ranks[j] = ranks[j + 1];
+        }
+        plen -= 1;
+
+        // recompute the rank of the pair spanning parts[a]..parts[b]
+        let rank_of = |a: usize, b: usize| {
+            if b < plen {
+                vocab
+                    .get(&piece[parts[a] as usize..parts[b] as usize])
+                    .unwrap_or(u32::MAX)
+            } else {
+                u32::MAX
+            }
+        };
+        // the merged pair at min_idx, then its predecessor
+        ranks[min_idx] = rank_of(min_idx, min_idx + 2);
+        if min_idx > 0 {
+            ranks[min_idx - 1] = rank_of(min_idx - 1, min_idx + 1);
+        }
+    }
+
+    plen
+}
+
+/// B

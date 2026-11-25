@@ -27,6 +27,11 @@ jobs:
       - run: cargo build --workspace --all-targets
       - run: cargo test --workspace --all-targets
       - run: cargo test --workspace --doc
+      # keeps the comparison harness building and running; no timing
+      - run: cargo run -p bench-compare -- book
+        env:
+          QUICK: "1"
+          ENCS: o200k_base
 
   feature-matrix:
     name: vocabulary feature combinations

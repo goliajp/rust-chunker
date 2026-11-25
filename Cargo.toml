@@ -74,6 +74,9 @@ vocab-minimax_m2 = ["tiktoken/vocab-minimax_m2"]
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
+[workspace]
+members = [".", "bench-compare"]
+
 [profile.release]
 lto = true
 codegen-units = 1
