@@ -1,6 +1,5 @@
 use crate::Chunk;
-use crate::byte_offset_of;
-use tiktoken::CoreBpe;
+use crate::plan::{Doc, plan, tiers};
 
 /// Separator tiers in priority order: paragraph → line → sentence → clause → word.
 ///
@@ -45,111 +44,20 @@ const TRAILING_ABSORB: &[char] = &[
     ' ', '\t', '\u{3000}', // trailing horizontal space
 ];
 
-/// split text recursively at semantic boundaries, respecting token limits.
-///
-/// the algorithm:
-/// 1. try splitting by the highest-priority separator (paragraph breaks first)
-/// 2. merge consecutive pieces until adding one more would exceed max_tokens
-/// 3. if a single piece exceeds max_tokens, recurse with the next separator
-/// 4. at the lowest level, split by tokens (guaranteed to fit)
-pub(crate) fn split_recursive(
-    text: &str,
-    text_offset: usize,
-    max_tokens: usize,
-    overlap_tokens: usize,
-    encoder: &CoreBpe,
-    section_path: &[String],
-) -> Vec<Chunk> {
-    split_with_tiers(
-        text,
-        text_offset,
+/// Split the whole document on [`TEXT_TIERS`]: paragraph, line, sentence,
+/// clause, word, and token boundaries as the last resort.
+pub(crate) fn split_recursive(doc: &Doc<'_>, max_tokens: usize, overlap: usize) -> Vec<Chunk> {
+    plan(
+        doc,
+        0,
+        doc.text.len(),
+        &tiers(TEXT_TIERS),
         max_tokens,
-        overlap_tokens,
-        encoder,
-        section_path,
-        TEXT_TIERS,
+        overlap,
     )
-}
-
-/// Everything the descent needs that does not change as it recurses.
-///
-/// Bundling these is not cosmetic: the descent passes them through four
-/// functions, and threading them individually is what earned the old
-/// `too_many_arguments` allow.
-#[derive(Clone, Copy)]
-pub(crate) struct Ctx<'a> {
-    pub max_tokens: usize,
-    pub overlap_tokens: usize,
-    pub encoder: &'a CoreBpe,
-    pub section_path: &'a [String],
-    /// Separator tiers, tried outermost first. Each strategy brings its own —
-    /// prose splits on sentence marks, code on block boundaries.
-    pub tiers: &'static [&'static [&'static str]],
-}
-
-/// Split with an explicit separator ladder.
-pub(crate) fn split_with_tiers(
-    text: &str,
-    text_offset: usize,
-    max_tokens: usize,
-    overlap_tokens: usize,
-    encoder: &CoreBpe,
-    section_path: &[String],
-    tiers: &'static [&'static [&'static str]],
-) -> Vec<Chunk> {
-    if text.is_empty() {
-        return Vec::new();
-    }
-
-    let token_count = encoder.count(text);
-    if token_count <= max_tokens {
-        return vec![Chunk {
-            content: text.to_string(),
-            index: 0,
-            start_byte: text_offset,
-            end_byte: text_offset + text.len(),
-            // token spans are filled in by a document-level pass in lib.rs,
-            // which is the only place that can see the whole token stream
-            start_token: 0,
-            end_token: 0,
-            token_count,
-            section_path: section_path.to_vec(),
-        }];
-    }
-
-    let ctx = Ctx {
-        max_tokens,
-        // clamp overlap to guarantee forward progress (must be < max_tokens)
-        overlap_tokens: overlap_tokens.min(max_tokens.saturating_sub(1)),
-        encoder,
-        section_path,
-        tiers,
-    };
-
-    descend(text, text_offset, ctx, 0)
-}
-
-fn descend(text: &str, text_offset: usize, ctx: Ctx<'_>, tier: usize) -> Vec<Chunk> {
-    // base case: token-level split
-    if tier >= ctx.tiers.len() {
-        return split_by_tokens(
-            text,
-            text_offset,
-            ctx.max_tokens,
-            ctx.overlap_tokens,
-            ctx.encoder,
-            ctx.section_path,
-        );
-    }
-
-    let pieces = split_at_any(text, ctx.tiers[tier]);
-
-    // if this tier didn't split anything, try the next
-    if pieces.len() <= 1 {
-        return descend(text, text_offset, ctx, tier + 1);
-    }
-
-    merge_pieces(&pieces, text, text_offset, ctx, tier + 1)
+    .into_iter()
+    .map(|p| doc.chunk(p, &[]))
+    .collect()
 }
 
 /// Split text at any separator in `seps`, keeping the separator attached to the
@@ -202,7 +110,7 @@ pub(crate) fn split_at_any<'a>(text: &'a str, seps: &[&str]) -> Vec<&'a str> {
 
 /// Extend `from` over any run of closing marks and horizontal whitespace, so
 /// they stay with the sentence they belong to rather than opening the next one.
-fn absorb_trailing(text: &str, from: usize) -> usize {
+pub(crate) fn absorb_trailing(text: &str, from: usize) -> usize {
     let mut end = from;
     while let Some(c) = text[end..].chars().next() {
         if TRAILING_ABSORB.contains(&c) {
@@ -214,300 +122,25 @@ fn absorb_trailing(text: &str, from: usize) -> usize {
     end
 }
 
-/// Merge pieces into chunks that fit within `max_tokens`.
-///
-/// `next_tier` is where an oversized piece goes to be split further. Strategies
-/// that produce their own pieces (HTML block tags, say) pass `0` to hand the
-/// remainder to the whole ladder.
-pub(crate) fn merge_pieces(
-    pieces: &[&str],
-    original_text: &str,
-    text_offset: usize,
-    ctx: Ctx<'_>,
-    next_tier: usize,
-) -> Vec<Chunk> {
-    let Ctx {
-        max_tokens,
-        overlap_tokens,
-        encoder,
-        section_path,
-        ..
-    } = ctx;
-
-    let mut chunks = Vec::new();
-    let mut current = String::new();
-    let mut current_tokens = 0usize;
-    let mut current_start = 0usize; // byte offset within original_text
-    let mut piece_end = 0usize;
-    // false while `current` holds only overlap carried from the previous chunk
-    let mut fresh = false;
-    // pieces (or overlap) in `current`; with one, `current_tokens` is exact
-    let mut parts = 0usize;
-
-    for piece in pieces {
-        let piece_tokens = encoder.count(piece);
-        let piece_offset = byte_offset_of(piece, original_text);
-
-        // single piece exceeds max — recurse with finer separator
-        if piece_tokens > max_tokens {
-            // flush current buffer first; overlap alone is not a chunk
-            if fresh {
-                chunks.push(make_chunk(
-                    &current,
-                    text_offset + current_start,
-                    (parts == 1).then_some(current_tokens),
-                    encoder,
-                    section_path,
-                ));
-            }
-            current.clear();
-            current_tokens = 0;
-            parts = 0;
-            fresh = false;
-
-            let sub_chunks = descend(piece, text_offset + piece_offset, ctx, next_tier);
-            chunks.extend(sub_chunks);
-            piece_end = piece_offset + piece.len();
-            current_start = piece_end;
-            continue;
-        }
-
-        // would adding this piece overflow? overlap alone gives way to the piece
-        if current_tokens + piece_tokens > max_tokens && !fresh {
-            current.clear();
-            current_tokens = 0;
-            parts = 0;
-        }
-        if current_tokens + piece_tokens > max_tokens && !current.is_empty() {
-            chunks.push(make_chunk(
-                &current,
-                text_offset + current_start,
-                (parts == 1).then_some(current_tokens),
-                encoder,
-                section_path,
-            ));
-
-            // handle overlap: take tokens from end of current chunk
-            let overlap_text = if overlap_tokens > 0 {
-                take_suffix_tokens(&current, overlap_tokens, encoder)
-            } else {
-                String::new()
-            };
-
-            current = overlap_text;
-            (current_tokens, parts) = if current.is_empty() {
-                (0, 0)
-            } else {
-                (encoder.count(&current), 1)
-            };
-            current_start = piece_end - current.len();
-        }
-
-        if current.is_empty() {
-            current_start = piece_offset;
-        }
-        current.push_str(piece);
-        current_tokens += piece_tokens;
-        parts += 1;
-        piece_end = piece_offset + piece.len();
-        fresh = true;
-    }
-
-    // flush remaining
-    if fresh {
-        chunks.push(make_chunk(
-            &current,
-            text_offset + current_start,
-            (parts == 1).then_some(current_tokens),
-            encoder,
-            section_path,
-        ));
-    }
-
-    // post-verify: re-split any chunks exceeding max_tokens.
-    // BPE tokenization is non-additive, so the sum of piece token counts
-    // may underestimate the actual merged token count. this pass catches
-    // the rare edge case and guarantees the max_tokens invariant.
-    // uses split_by_tokens (not split_recursive) to avoid infinite recursion.
-    let needs_resplit = chunks.iter().any(|c| c.token_count > max_tokens);
-    let mut final_chunks = if needs_resplit {
-        let mut verified = Vec::new();
-        for chunk in chunks {
-            if chunk.token_count > max_tokens {
-                let sub = split_by_tokens(
-                    &chunk.content,
-                    chunk.start_byte,
-                    max_tokens,
-                    0, // no overlap in post-verify to guarantee termination
-                    encoder,
-                    section_path,
-                );
-                verified.extend(sub);
-            } else {
-                verified.push(chunk);
-            }
-        }
-        verified
-    } else {
-        chunks
-    };
-
-    // assign sequential indices
-    for (i, chunk) in final_chunks.iter_mut().enumerate() {
-        chunk.index = i;
-    }
-
-    final_chunks
-}
-
-/// split by tokens as last resort — precise byte offsets per token chunk
-fn split_by_tokens(
-    text: &str,
-    text_offset: usize,
-    max_tokens: usize,
-    overlap_tokens: usize,
-    encoder: &CoreBpe,
-    section_path: &[String],
-) -> Vec<Chunk> {
-    let tokens = encoder.encode(text);
-    let mut chunks = Vec::new();
-
-    // Cumulative byte offsets, snapped back to character boundaries.
-    //
-    // A single character can span several tokens (rare CJK and emoji fall back
-    // to byte-level tokens), so a raw token boundary is not necessarily a
-    // character boundary. Snapping *back* keeps each slice a subset of its
-    // token window; the bytes trimmed here go to the next chunk.
-    let mut boundaries = Vec::with_capacity(tokens.len() + 1);
-    boundaries.push(0usize);
-    let mut acc = 0usize;
-    for &t in &tokens {
-        acc += crate::token_len(encoder, t);
-        boundaries.push(floor_char_boundary(text, acc));
-    }
-
-    let mut start = 0usize;
-    let mut byte_start = 0usize;
-    let mut prev_end = 0usize;
-    while byte_start < text.len() {
-        let mut byte_end = boundaries[(start + max_tokens).min(tokens.len())];
-        if byte_end <= prev_end {
-            // the window ends where the previous chunk did: drop the overlap
-            byte_start = byte_start.max(prev_end);
-        }
-        byte_end = byte_end.max(next_char_boundary(text, byte_start.max(prev_end)));
-        let (byte_end, token_count) = fit(text, byte_start, byte_end, max_tokens, encoder);
-
-        chunks.push(Chunk {
-            content: text[byte_start..byte_end].to_string(),
-            index: chunks.len(),
-            start_byte: text_offset + byte_start,
-            end_byte: text_offset + byte_end,
-            start_token: 0,
-            end_token: 0,
-            token_count,
-            section_path: section_path.to_vec(),
-        });
-        prev_end = byte_end;
-
-        let next = if overlap_tokens > 0 {
-            boundaries[(start + max_tokens.saturating_sub(overlap_tokens).max(1)).min(tokens.len())]
-                .min(byte_end)
-        } else {
-            byte_end
-        };
-        byte_start = if next > byte_start { next } else { byte_end };
-        // first token whose window can start at `byte_start`
-        start = boundaries.partition_point(|&b| b <= byte_start) - 1;
-    }
-
-    chunks
-}
-
-/// Shrink `start..end` one character at a time until it fits `max_tokens`.
-/// A single character is never cut, so it is returned even when it does not
-/// fit. Returns the end and the token count of what was kept.
-pub(crate) fn fit(
-    text: &str,
-    start: usize,
-    mut end: usize,
-    max_tokens: usize,
-    encoder: &CoreBpe,
-) -> (usize, usize) {
-    let mut count = encoder.count(&text[start..end]);
-    while count > max_tokens {
-        let prev = floor_char_boundary(text, end - 1);
-        if prev <= start {
-            break;
-        }
-        end = prev;
-        count = encoder.count(&text[start..end]);
-    }
-    (end, count)
-}
-
-/// Smallest character boundary above `i`, or the text length.
-fn next_char_boundary(text: &str, i: usize) -> usize {
-    let mut i = (i + 1).min(text.len());
-    while !text.is_char_boundary(i) {
-        i += 1;
-    }
-    i
-}
-
-/// Largest character boundary at or below `i`.
-fn floor_char_boundary(text: &str, i: usize) -> usize {
-    let mut i = i.min(text.len());
-    while i > 0 && !text.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
-
-/// `known` is the token count when the caller already has it exactly.
-fn make_chunk(
-    content: &str,
-    start_byte: usize,
-    known: Option<usize>,
-    encoder: &CoreBpe,
-    section_path: &[String],
-) -> Chunk {
-    Chunk {
-        content: content.to_string(),
-        index: 0, // will be assigned later
-        start_byte,
-        end_byte: start_byte + content.len(),
-        start_token: 0,
-        end_token: 0,
-        token_count: known.unwrap_or_else(|| encoder.count(content)),
-        section_path: section_path.to_vec(),
-    }
-}
-
-/// take approximately `n` tokens from the end of text, preserving valid UTF-8.
-/// returns a substring of the original text (no lossy conversion).
-/// Never the whole text: the next chunk must start after this one did.
-fn take_suffix_tokens(text: &str, n: usize, encoder: &CoreBpe) -> String {
-    let tokens = encoder.encode(text);
-    let n = n.min(tokens.len().saturating_sub(1));
-    if n == 0 {
-        return String::new();
-    }
-    let prefix_byte_len = encoder.decode(&tokens[..tokens.len() - n]).len();
-    // find next char boundary (BPE tokens may split multi-byte chars)
-    let mut start = prefix_byte_len;
-    while start < text.len() && !text.is_char_boundary(start) {
-        start += 1;
-    }
-    text[start..].to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn encoder() -> &'static CoreBpe {
+    fn encoder() -> &'static tiktoken::CoreBpe {
         tiktoken::get_encoding("o200k_base").unwrap()
+    }
+
+    fn split_recursive(
+        text: &str,
+        _offset: usize,
+        max: usize,
+        overlap: usize,
+        enc: &tiktoken::CoreBpe,
+        _path: &[String],
+    ) -> Vec<Chunk> {
+        let mut chunks = super::split_recursive(&Doc::new(text, enc), max, overlap);
+        crate::finish(&mut chunks);
+        chunks
     }
 
     #[test]
@@ -615,17 +248,6 @@ mod tests {
     }
 
     #[test]
-    fn floor_char_boundary_snaps_back() {
-        let s = "日本語"; // 3 bytes per char
-        assert_eq!(floor_char_boundary(s, 0), 0);
-        assert_eq!(floor_char_boundary(s, 1), 0);
-        assert_eq!(floor_char_boundary(s, 2), 0);
-        assert_eq!(floor_char_boundary(s, 3), 3);
-        assert_eq!(floor_char_boundary(s, 4), 3);
-        assert_eq!(floor_char_boundary(s, 99), s.len());
-    }
-
-    #[test]
     fn short_text_returns_single_chunk() {
         let enc = encoder();
         let chunks = split_recursive("hello world", 0, 100, 0, enc, &[]);
@@ -695,56 +317,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn section_metadata_preserved() {
-        let enc = encoder();
-        let path = vec!["# Design".to_string(), "## Architecture".to_string()];
-        let chunks = split_recursive("hello world", 0, 100, 0, enc, &path);
-        assert_eq!(chunks[0].section_path, path);
-        assert_eq!(chunks[0].section(), Some("## Architecture"));
-    }
-
-    #[test]
-    fn text_offset_propagated() {
-        let enc = encoder();
-        let chunks = split_recursive("hello", 100, 100, 0, enc, &[]);
-        assert_eq!(chunks[0].start_byte, 100);
-        assert_eq!(chunks[0].end_byte, 105);
-    }
-
-    #[test]
-    fn byte_offset_of_works() {
-        let text = "hello world";
-        let sub = &text[6..];
-        assert_eq!(byte_offset_of(sub, text), 6);
-    }
-
-    #[test]
-    fn take_suffix_tokens_basic() {
-        let enc = encoder();
-        let suffix = take_suffix_tokens("hello world foo bar", 2, enc);
-        assert!(!suffix.is_empty());
-        assert!(encoder().count(&suffix) <= 2);
-    }
-
-    #[test]
-    fn take_suffix_tokens_never_takes_everything() {
-        let enc = encoder();
-        assert_eq!(take_suffix_tokens("hi", 100, enc), "");
-        let suffix = take_suffix_tokens("hello world foo", 100, enc);
-        assert!(!suffix.is_empty() && suffix.len() < "hello world foo".len());
-    }
-
-    #[test]
-    fn take_suffix_tokens_preserves_utf8() {
-        let enc = encoder();
-        let text = "こんにちは世界テスト";
-        let suffix = take_suffix_tokens(text, 2, enc);
-        // must be valid UTF-8 (no replacement characters)
-        assert!(!suffix.contains('\u{FFFD}'));
-        assert!(!suffix.is_empty());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use crate::Chunk;
 use crate::byte_offset_of;
-use crate::recursive::split_recursive;
-use tiktoken::CoreBpe;
+use crate::plan::{Doc, plan, tiers};
+use crate::recursive::TEXT_TIERS;
 
 /// split markdown text by headers first, then apply recursive splitting within each section.
 ///
@@ -13,33 +13,17 @@ use tiktoken::CoreBpe;
 ///
 /// note: header lines are stored in metadata only, not in chunk `content`.
 /// joining all chunk contents will not reproduce header lines from the original document.
-pub(crate) fn split_markdown(
-    text: &str,
-    max_tokens: usize,
-    overlap_tokens: usize,
-    encoder: &CoreBpe,
-) -> Vec<Chunk> {
-    let sections = extract_sections(text);
-    let mut all_chunks = Vec::new();
-
-    for section in &sections {
-        let sub_chunks = split_recursive(
-            &section.content,
-            section.byte_offset,
-            max_tokens,
-            overlap_tokens,
-            encoder,
-            &section.path,
-        );
-        all_chunks.extend(sub_chunks);
+pub(crate) fn split_markdown(doc: &Doc<'_>, max_tokens: usize, overlap: usize) -> Vec<Chunk> {
+    let ladder = tiers(TEXT_TIERS);
+    let mut chunks = Vec::new();
+    for section in extract_sections(doc.text) {
+        let start = section.byte_offset;
+        let end = start + section.content.len();
+        for piece in plan(doc, start, end, &ladder, max_tokens, overlap) {
+            chunks.push(doc.chunk(piece, &section.path));
+        }
     }
-
-    // reassign sequential indices
-    for (i, chunk) in all_chunks.iter_mut().enumerate() {
-        chunk.index = i;
-    }
-
-    all_chunks
+    chunks
 }
 
 /// An open fenced code block: the marker character and how many of it opened
@@ -56,16 +40,18 @@ struct Fence {
 const MAX_BLOCK_INDENT: usize = 3;
 
 /// A run of body text together with the header ancestry it sits under.
-struct Section {
+struct Section<'a> {
     /// Headers from outermost to innermost, e.g.
     /// `["# Guide", "## Installation"]`. Empty before the first header.
     path: Vec<String>,
-    content: String,
+    /// The body between this section's header and the next, a slice of the
+    /// document.
+    content: &'a str,
     byte_offset: usize,
 }
 
 /// extract markdown sections with their header ancestry
-fn extract_sections(text: &str) -> Vec<Section> {
+fn extract_sections(text: &str) -> Vec<Section<'_>> {
     let lines: Vec<&str> = text.split_inclusive('\n').collect();
     let front_matter_end = front_matter_end(&lines);
 
@@ -74,8 +60,8 @@ fn extract_sections(text: &str) -> Vec<Section> {
     // entry at level >= L, so `## Usage` after `### From source` correctly
     // drops back to sitting under `# Guide`.
     let mut stack: Vec<(usize, String)> = Vec::new();
-    let mut current_content = String::new();
-    let mut current_offset = 0usize;
+    // byte range of the body collected since the last header
+    let mut current: Option<(usize, usize)> = None;
     let mut fence: Option<Fence> = None;
     let mut skip_next = false;
 
@@ -98,12 +84,12 @@ fn extract_sections(text: &str) -> Vec<Section> {
             if indented_enough && closes_fence(body, open) {
                 fence = None;
             }
-            push_content(line, text, &mut current_content, &mut current_offset);
+            push_content(line, text, &mut current);
             continue;
         }
         if indented_enough && let Some(open) = opens_fence(body) {
             fence = Some(open);
-            push_content(line, text, &mut current_content, &mut current_offset);
+            push_content(line, text, &mut current);
             continue;
         }
 
@@ -113,7 +99,6 @@ fn extract_sections(text: &str) -> Vec<Section> {
         let in_front_matter = i < front_matter_end;
 
         let mut header: Option<(usize, String)> = None;
-        let mut header_end = line.len();
 
         if !in_front_matter && indented_enough {
             if let Some(level) = atx_level(body) {
@@ -123,7 +108,6 @@ fn extract_sections(text: &str) -> Vec<Section> {
             {
                 // `Title` followed by `====` (level 1) or `----` (level 2)
                 header = Some((level, body.trim_end().to_string()));
-                header_end = line.len() + lines[i + 1].len();
                 skip_next = true;
             }
         }
@@ -131,38 +115,36 @@ fn extract_sections(text: &str) -> Vec<Section> {
         match header {
             Some((level, text_of_header)) => {
                 // flush previous section
-                if !current_content.is_empty() {
+                if let Some((start, end)) = current.take() {
                     sections.push(Section {
                         path: stack.iter().map(|(_, h)| h.clone()).collect(),
-                        content: std::mem::take(&mut current_content),
-                        byte_offset: current_offset,
+                        content: &text[start..end],
+                        byte_offset: start,
                     });
                 }
                 stack.retain(|(l, _)| *l < level);
                 stack.push((level, text_of_header));
-                current_offset = byte_offset_of(line, text) + header_end;
             }
-            None => push_content(line, text, &mut current_content, &mut current_offset),
+            None => push_content(line, text, &mut current),
         }
     }
 
     // flush last section
-    if !current_content.is_empty() {
+    if let Some((start, end)) = current {
         sections.push(Section {
             path: stack.iter().map(|(_, h)| h.clone()).collect(),
-            content: current_content,
-            byte_offset: current_offset,
+            content: &text[start..end],
+            byte_offset: start,
         });
     }
 
     sections
 }
 
-fn push_content(line: &str, text: &str, content: &mut String, offset: &mut usize) {
-    if content.is_empty() {
-        *offset = byte_offset_of(line, text);
-    }
-    content.push_str(line);
+fn push_content(line: &str, text: &str, current: &mut Option<(usize, usize)>) {
+    let at = byte_offset_of(line, text);
+    let start = current.map_or(at, |(start, _)| start);
+    *current = Some((start, at + line.len()));
 }
 
 /// Nesting level of an ATX header: one to six `#` followed by a space.
@@ -236,8 +218,19 @@ fn front_matter_end(lines: &[&str]) -> usize {
 mod tests {
     use super::*;
 
-    fn encoder() -> &'static CoreBpe {
+    fn encoder() -> &'static tiktoken::CoreBpe {
         tiktoken::get_encoding("o200k_base").unwrap()
+    }
+
+    fn split_markdown(
+        text: &str,
+        max: usize,
+        overlap: usize,
+        enc: &tiktoken::CoreBpe,
+    ) -> Vec<Chunk> {
+        let mut chunks = super::split_markdown(&Doc::new(text, enc), max, overlap);
+        crate::finish(&mut chunks);
+        chunks
     }
 
     #[test]

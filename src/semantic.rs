@@ -1,6 +1,6 @@
 use crate::Chunk;
-use crate::recursive::split_recursive;
-use tiktoken::CoreBpe;
+use crate::plan::{Doc, plan, tiers};
+use crate::recursive::{TEXT_TIERS, split_recursive};
 
 /// split text at semantic boundaries using embedding similarity.
 ///
@@ -12,21 +12,15 @@ use tiktoken::CoreBpe;
 /// 5. merge sentences between breakpoints into chunks
 /// 6. if a chunk exceeds max_tokens, apply recursive splitting
 pub(crate) async fn split_semantic(
-    text: &str,
+    doc: &Doc<'_>,
     max_tokens: usize,
     overlap_tokens: usize,
-    encoder: &CoreBpe,
     client: &embedrs::Client,
     threshold: f64,
 ) -> Result<Vec<Chunk>, crate::Error> {
-    if text.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let sentences = split_sentences(text);
+    let sentences = split_sentences(doc.text);
     if sentences.len() <= 1 {
-        let chunks = split_recursive(text, 0, max_tokens, overlap_tokens, encoder, &[]);
-        return Ok(chunks);
+        return Ok(split_recursive(doc, max_tokens, overlap_tokens));
     }
 
     // `embed` sends one request and fails on more inputs than the provider
@@ -41,12 +35,11 @@ pub(crate) async fn split_semantic(
     let breakpoints = find_breakpoints(&embed_result.embeddings, threshold);
 
     Ok(split_groups(
-        text,
+        doc,
         &sentences,
         &breakpoints,
         max_tokens,
         overlap_tokens,
-        encoder,
     ))
 }
 
@@ -56,33 +49,31 @@ pub(crate) async fn split_semantic(
 /// whitespace-only sentences that were left out of the embedding stay inside
 /// it and every chunk's byte range still addresses `text`.
 fn split_groups(
-    text: &str,
+    doc: &Doc<'_>,
     sentences: &[Sentence<'_>],
     breakpoints: &[usize],
     max_tokens: usize,
     overlap_tokens: usize,
-    encoder: &CoreBpe,
 ) -> Vec<Chunk> {
-    let mut all_chunks = Vec::new();
+    let ladder = tiers(TEXT_TIERS);
+    let mut chunks = Vec::new();
     for group in merge_at_breakpoints(sentences, breakpoints) {
         let (Some(first), Some(last)) = (group.first(), group.last()) else {
             continue;
         };
-        let start = first.byte_offset;
         let end = last.byte_offset + last.text.len();
-        all_chunks.extend(split_recursive(
-            &text[start..end],
-            start,
+        for piece in plan(
+            doc,
+            first.byte_offset,
+            end,
+            &ladder,
             max_tokens,
             overlap_tokens,
-            encoder,
-            &[],
-        ));
+        ) {
+            chunks.push(doc.chunk(piece, &[]));
+        }
     }
-    for (i, chunk) in all_chunks.iter_mut().enumerate() {
-        chunk.index = i;
-    }
-    all_chunks
+    chunks
 }
 
 struct Sentence<'a> {
@@ -300,7 +291,7 @@ mod tests {
         // break before every sentence, and before none
         let all: Vec<usize> = (1..sentences.len()).collect();
         for breakpoints in [all, Vec::new()] {
-            let chunks = split_groups(text, &sentences, &breakpoints, 512, 0, enc);
+            let chunks = split_groups(&Doc::new(text, enc), &sentences, &breakpoints, 512, 0);
             assert!(!chunks.is_empty());
             for c in &chunks {
                 assert_eq!(&text[c.start_byte..c.end_byte], c.content);

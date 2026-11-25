@@ -285,7 +285,7 @@ fn cases() -> u64 {
         .unwrap_or(120)
 }
 
-fn run(strategy: Strategy, salt: u64, with_overlap: bool) {
+fn run(strategy: Strategy, salt: u64) {
     let encodings: &[&str] = &[
         "o200k_base",
         #[cfg(feature = "vocab-cl100k_base")]
@@ -299,7 +299,7 @@ fn run(strategy: Strategy, salt: u64, with_overlap: bool) {
         let mut rng = Rng(seed);
         let text = document(&mut rng);
         let max = [1, 2, 3, 5, 8, 16, 40, 128, 512][rng.below(9)];
-        let overlap = if with_overlap && rng.below(2) == 0 {
+        let overlap = if rng.below(2) == 0 {
             rng.below(max + 2)
         } else {
             0
@@ -321,20 +321,20 @@ fn run(strategy: Strategy, salt: u64, with_overlap: bool) {
 
 #[test]
 fn recursive_holds_invariants() {
-    run(Strategy::Recursive, 1, false);
+    run(Strategy::Recursive, 1);
 }
 
 #[test]
 fn markdown_holds_invariants() {
-    run(Strategy::Markdown, 2, false);
+    run(Strategy::Markdown, 2);
 }
 
 #[test]
 fn code_holds_invariants() {
-    run(Strategy::Code, 3, false);
+    run(Strategy::Code, 3);
 }
 
 #[test]
 fn html_holds_invariants() {
-    run(Strategy::Html, 4, false);
+    run(Strategy::Html, 4);
 }

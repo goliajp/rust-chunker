@@ -1,6 +1,5 @@
 use crate::Chunk;
-use crate::recursive::split_with_tiers;
-use tiktoken::CoreBpe;
+use crate::plan::{Doc, plan, tiers};
 
 /// Separator tiers for source code, outermost first.
 ///
@@ -34,33 +33,32 @@ pub(crate) const CODE_TIERS: &[&[&str]] = &[
 ];
 
 /// Split source code at boundary markers, respecting token limits.
-pub(crate) fn split_code(
-    text: &str,
-    max_tokens: usize,
-    overlap_tokens: usize,
-    encoder: &CoreBpe,
-) -> Vec<Chunk> {
-    let mut chunks = split_with_tiers(
-        text,
+pub(crate) fn split_code(doc: &Doc<'_>, max_tokens: usize, overlap: usize) -> Vec<Chunk> {
+    plan(
+        doc,
         0,
+        doc.text.len(),
+        &tiers(CODE_TIERS),
         max_tokens,
-        overlap_tokens,
-        encoder,
-        &[],
-        CODE_TIERS,
-    );
-    for (i, chunk) in chunks.iter_mut().enumerate() {
-        chunk.index = i;
-    }
-    chunks
+        overlap,
+    )
+    .into_iter()
+    .map(|p| doc.chunk(p, &[]))
+    .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn encoder() -> &'static CoreBpe {
+    fn encoder() -> &'static tiktoken::CoreBpe {
         tiktoken::get_encoding("o200k_base").unwrap()
+    }
+
+    fn split_code(text: &str, max: usize, overlap: usize, enc: &tiktoken::CoreBpe) -> Vec<Chunk> {
+        let mut chunks = super::split_code(&Doc::new(text, enc), max, overlap);
+        crate::finish(&mut chunks);
+        chunks
     }
 
     #[test]

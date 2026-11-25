@@ -1,6 +1,6 @@
 use crate::Chunk;
-use crate::recursive::{Ctx, TEXT_TIERS, merge_pieces};
-use tiktoken::CoreBpe;
+use crate::plan::{Doc, Tier, plan, tiers};
+use crate::recursive::TEXT_TIERS;
 
 /// Tags whose closing marks the end of a block of content.
 ///
@@ -56,41 +56,19 @@ const BLOCK_TAGS: &[&str] = &[
 /// This is **boundary-aware, not DOM-aware**: it scans bytes for `</tag>` and
 /// builds no tree. Malformed or unclosed markup simply yields fewer boundaries
 /// and degrades to the text ladder rather than failing.
-pub(crate) fn split_html(
-    text: &str,
-    max_tokens: usize,
-    overlap_tokens: usize,
-    encoder: &CoreBpe,
-) -> Vec<Chunk> {
-    if text.is_empty() {
-        return Vec::new();
+pub(crate) fn split_html(doc: &Doc<'_>, max_tokens: usize, overlap: usize) -> Vec<Chunk> {
+    let mut cuts = Vec::new();
+    let mut at = 0;
+    for piece in split_at_block_tags(doc.text) {
+        at += piece.len();
+        cuts.push(at);
     }
-
-    let token_count = encoder.count(text);
-    if token_count <= max_tokens {
-        return vec![
-            Chunk::new(text)
-                .with_bytes(0, text.len())
-                .with_token_count(token_count),
-        ];
-    }
-
-    let pieces = split_at_block_tags(text);
-
-    let ctx = Ctx {
-        max_tokens,
-        overlap_tokens: overlap_tokens.min(max_tokens.saturating_sub(1)),
-        encoder,
-        section_path: &[],
-        tiers: TEXT_TIERS,
-    };
-
-    // `0` hands any oversized block to the whole text ladder.
-    let mut chunks = merge_pieces(&pieces, text, 0, ctx, 0);
-    for (i, chunk) in chunks.iter_mut().enumerate() {
-        chunk.index = i;
-    }
-    chunks
+    let mut ladder = vec![Tier::Cuts(cuts)];
+    ladder.extend(tiers(TEXT_TIERS));
+    plan(doc, 0, doc.text.len(), &ladder, max_tokens, overlap)
+        .into_iter()
+        .map(|p| doc.chunk(p, &[]))
+        .collect()
 }
 
 /// Cut `text` after every block-level closing tag.
@@ -145,8 +123,14 @@ fn split_at_block_tags(text: &str) -> Vec<&str> {
 mod tests {
     use super::*;
 
-    fn encoder() -> &'static CoreBpe {
+    fn encoder() -> &'static tiktoken::CoreBpe {
         tiktoken::get_encoding("o200k_base").unwrap()
+    }
+
+    fn split_html(text: &str, max: usize, overlap: usize, enc: &tiktoken::CoreBpe) -> Vec<Chunk> {
+        let mut chunks = super::split_html(&Doc::new(text, enc), max, overlap);
+        crate::finish(&mut chunks);
+        chunks
     }
 
     #[test]
