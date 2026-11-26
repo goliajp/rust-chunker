@@ -1,6 +1,6 @@
 [package]
 name = "chunkedrs"
-version = "2.2.0"
+version = "3.0.0"
 edition = "2024"
 description = "Split text into chunks that fit a token budget, for embedding and retrieval: recursive, markdown, code, HTML and semantic strategies, exact byte ranges and document token spans"
 license = "MIT OR Apache-2.0"
