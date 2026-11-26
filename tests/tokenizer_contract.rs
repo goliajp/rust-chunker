@@ -9,7 +9,7 @@
 
 /// Vocabularies are features as of tiktoken 4, so only the ones this build
 /// actually compiled in can be asserted against. `o200k_base` is always
-/// present — it is the fallback encoder chunkedrs resolves to.
+/// present: it is the encoding `Chunker::new` uses.
 const ENCODINGS_UNDER_TEST: &[&str] = &[
     "o200k_base",
     #[cfg(feature = "vocab-cl100k_base")]
@@ -69,9 +69,8 @@ fn paragraph_breaks_are_not_overcounted() {
 
 /// The encodings chunkedrs advertises must actually resolve.
 ///
-/// `.model()` falls back to `o200k_base` silently on an unknown name, so a
-/// missing mapping is invisible at runtime — it just quietly produces the
-/// wrong token counts. These are the families the README names.
+/// These are the families the README names. A model tiktoken stops mapping
+/// would make `Chunker::for_model` return an error for it.
 #[test]
 fn advertised_models_resolve() {
     for model in [
@@ -98,7 +97,14 @@ fn advertised_models_resolve() {
     ] {
         assert!(
             tiktoken::model_to_encoding(model).is_some(),
-            "model '{model}' must map to an encoding, not fall back silently"
+            "model '{model}' must map to an encoding"
+        );
+        // a slim build leaves most vocabularies out, and then it is an error
+        let built = tiktoken::encoding_for_model(model).is_some();
+        assert_eq!(
+            chunkedrs::Chunker::for_model(model).is_ok(),
+            built,
+            "{model}"
         );
     }
 }
@@ -153,14 +159,14 @@ fn full_catalogue_is_present() {
     }
 }
 
-/// `o200k_base` is the encoder every unresolved name falls back to, so it must
-/// be present in *every* build regardless of which vocab features are on.
+/// `o200k_base` is the encoding `Chunker::new` uses, so it must be present in
+/// *every* build regardless of which vocab features are on.
 /// The dependency declaration enables it unconditionally; this pins that.
 #[test]
-fn fallback_encoding_is_always_available() {
+fn default_encoding_is_always_available() {
     assert!(
         tiktoken::get_encoding("o200k_base").is_some(),
         "o200k_base must survive `default-features = false`"
     );
-    assert!(chunkedrs::chunk("hello world").split()[0].token_count > 0);
+    assert!(chunkedrs::Chunker::new().split("hello world")[0].token_count > 0);
 }

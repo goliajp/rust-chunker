@@ -30,7 +30,7 @@ fn assert_no_chunk_starts_with_punctuation(chunks: &[chunkedrs::Chunk], label: &
 #[test]
 fn chinese_prose_splits_on_sentence_marks() {
     let zh = "这是第一句话，讲的是分块。这是第二句话，讲的是检索。这是第三句话，讲的是嵌入。这是第四句话，讲的是排序。";
-    let chunks = chunkedrs::chunk(zh).max_tokens(12).split();
+    let chunks = chunkedrs::Chunker::new().max_tokens(12).split(zh);
 
     assert!(chunks.len() >= 2, "expected multiple chunks");
     assert_no_chunk_starts_with_punctuation(&chunks, "zh");
@@ -51,7 +51,7 @@ fn chinese_prose_splits_on_sentence_marks() {
 fn japanese_prose_splits_on_sentence_marks() {
     let ja =
         "これは最初の文です。これは二番目の文です。これは三番目の文です。これは四番目の文です。";
-    let chunks = chunkedrs::chunk(ja).max_tokens(12).split();
+    let chunks = chunkedrs::Chunker::new().max_tokens(12).split(ja);
 
     assert!(chunks.len() >= 2, "expected multiple chunks");
     assert_no_chunk_starts_with_punctuation(&chunks, "ja");
@@ -72,7 +72,7 @@ fn japanese_prose_splits_on_sentence_marks() {
 #[test]
 fn chinese_falls_back_to_clause_marks() {
     let zh = "分块策略的选择取决于文档结构，检索目标，以及下游模型的上下文窗口大小，这几个因素互相牵制。";
-    let chunks = chunkedrs::chunk(zh).max_tokens(10).split();
+    let chunks = chunkedrs::Chunker::new().max_tokens(10).split(zh);
 
     assert!(chunks.len() >= 2);
     assert_no_chunk_starts_with_punctuation(&chunks, "zh-clause");
@@ -83,7 +83,7 @@ fn chinese_falls_back_to_clause_marks() {
 #[test]
 fn mixed_script_document_splits_both_scripts() {
     let mixed = "This is an English sentence. And a second one here.\n\n这是一句中文。这是第二句中文。这是第三句。";
-    let chunks = chunkedrs::chunk(mixed).max_tokens(12).split();
+    let chunks = chunkedrs::Chunker::new().max_tokens(12).split(mixed);
 
     assert!(chunks.len() >= 3);
     assert_no_chunk_starts_with_punctuation(&chunks, "mixed");
@@ -94,7 +94,7 @@ fn mixed_script_document_splits_both_scripts() {
 #[test]
 fn cjk_closing_punctuation_stays_with_its_sentence() {
     let zh = "他说「今天天气很好。」然后就出门了。她回答说「确实不错。」于是也跟着出去了。";
-    let chunks = chunkedrs::chunk(zh).max_tokens(12).split();
+    let chunks = chunkedrs::Chunker::new().max_tokens(12).split(zh);
 
     for c in &chunks {
         let first = c.content.trim_start().chars().next().unwrap();
@@ -115,7 +115,7 @@ fn token_level_split_never_produces_replacement_chars() {
     // No separators at all, so this can only be split by tokens.
     let dense = "日本語日本語日本語日本語日本語日本語日本語日本語日本語日本語".repeat(3);
     for max in [1usize, 2, 3, 5, 8] {
-        let chunks = chunkedrs::chunk(&dense).max_tokens(max).split();
+        let chunks = chunkedrs::Chunker::new().max_tokens(max).split(&dense);
         for c in &chunks {
             assert!(
                 !c.content.contains('\u{FFFD}'),
@@ -124,7 +124,7 @@ fn token_level_split_never_produces_replacement_chars() {
                 c.content
             );
         }
-        let rejoined: String = chunks.iter().map(|c| c.content.as_str()).collect();
+        let rejoined: String = chunks.iter().map(|c| c.content).collect();
         assert_eq!(
             rejoined, dense,
             "max_tokens={max}: token-level split must be lossless"
@@ -137,7 +137,7 @@ fn token_level_split_never_produces_replacement_chars() {
 #[test]
 fn cjk_byte_offsets_address_original_text() {
     let zh = "第一句在这里。第二句在这里。第三句在这里。第四句在这里。第五句在这里。";
-    let chunks = chunkedrs::chunk(zh).max_tokens(8).split();
+    let chunks = chunkedrs::Chunker::new().max_tokens(8).split(zh);
     for c in &chunks {
         assert_eq!(
             &zh[c.start_byte..c.end_byte],

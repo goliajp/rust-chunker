@@ -1,6 +1,6 @@
 use crate::Chunk;
 use crate::plan::{Doc, Tier, plan, tiers};
-use crate::recursive::TEXT_TIERS;
+use crate::strategy::recursive::TEXT_TIERS;
 
 /// Tags whose closing marks the end of a block of content.
 ///
@@ -56,7 +56,7 @@ const BLOCK_TAGS: &[&str] = &[
 /// This is **boundary-aware, not DOM-aware**: it scans bytes for `</tag>` and
 /// builds no tree. Malformed or unclosed markup simply yields fewer boundaries
 /// and degrades to the text ladder rather than failing.
-pub(crate) fn split_html(doc: &Doc<'_>, max_tokens: usize, overlap: usize) -> Vec<Chunk> {
+pub(crate) fn split_html<'a>(doc: &Doc<'a>, max_tokens: usize, overlap: usize) -> Vec<Chunk<'a>> {
     let mut cuts = Vec::new();
     let mut at = 0;
     for piece in split_at_block_tags(doc.text) {
@@ -127,9 +127,14 @@ mod tests {
         tiktoken::get_encoding("o200k_base").unwrap()
     }
 
-    fn split_html(text: &str, max: usize, overlap: usize, enc: &tiktoken::CoreBpe) -> Vec<Chunk> {
+    fn split_html<'a>(
+        text: &'a str,
+        max: usize,
+        overlap: usize,
+        enc: &'static tiktoken::CoreBpe,
+    ) -> Vec<Chunk<'a>> {
         let mut chunks = super::split_html(&Doc::new(text, enc), max, overlap);
-        crate::finish(&mut chunks);
+        crate::chunker::finish(&mut chunks);
         chunks
     }
 
@@ -191,7 +196,7 @@ mod tests {
             assert!(c.token_count <= 10, "chunk {} over budget", c.index);
             assert_eq!(&html[c.start_byte..c.end_byte], c.content);
         }
-        let rejoined: String = chunks.iter().map(|c| c.content.as_str()).collect();
+        let rejoined: String = chunks.iter().map(|c| c.content).collect();
         assert_eq!(rejoined, html);
     }
 

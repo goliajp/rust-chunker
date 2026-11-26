@@ -24,13 +24,13 @@ that lie near the plane of Earth's orbit, called the ecliptic.";
     let overlap_tokens = 10;
 
     // split without overlap
-    let no_overlap = chunkedrs::chunk(text).max_tokens(max_tokens).split();
+    let no_overlap = chunkedrs::Chunker::new().max_tokens(max_tokens).split(text);
 
     // split with overlap
-    let with_overlap = chunkedrs::chunk(text)
+    let with_overlap = chunkedrs::Chunker::new()
         .max_tokens(max_tokens)
         .overlap(overlap_tokens)
-        .split();
+        .split(text);
 
     println!("max_tokens: {max_tokens}, overlap: {overlap_tokens}\n");
     println!(

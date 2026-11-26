@@ -5,6 +5,78 @@ All notable changes to this crate will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Upgrading from 2.x
+
+3.0 changes the API; the chunks themselves do not change. Recursive,
+markdown, code and HTML splitting give the same byte ranges, token spans,
+token counts and section paths as 2.2 for the same encoding, budget and
+overlap (a test compares the two on every strategy, five encodings and
+2,000 generated documents). Semantic splitting changed; see below.
+
+| 2.x | 3.0 |
+|---|---|
+| `chunkedrs::chunk(t).split()` | `chunkedrs::split(t)` |
+| `chunk(t).max_tokens(n).overlap(o).split()` | `Chunker::new().max_tokens(n).overlap(o).split(t)` |
+| `chunk(t).model(m)`: an unknown name fell back to `o200k_base` | `Chunker::for_model(m)?`: an unknown name, or one whose vocabulary feature is off, is `Error::UnknownModel`; `.unwrap_or_else(\|_\| Chunker::new())` keeps the old fallback |
+| `chunk(t).encoding(e)` | `Chunker::for_encoding(e)?` or `Chunker::with_encoder(enc)` |
+| `chunk(t).markdown()` / `.code()` / `.html()` | the same methods on `Chunker` |
+| `Chunker::model(m)` / `Chunker::encoding(e)` | `Chunker::for_model(m)?` / `Chunker::for_encoding(e)?` |
+| `Chunk` owns its text | `Chunk<'a>` borrows it: `content: &'a str`, `section_path: Vec<&'a str>`; `chunk.to_owned_chunk()` gives an `OwnedChunk` with the 2.x field types |
+| `Chunk::new(..).with_bytes(..)` | removed; `OwnedChunk::default()` and set the fields |
+| encode the document again for late chunking | `Chunker::split_with_tokens(t)` returns the ids with the chunks |
+| `chunk(t).semantic(&client).threshold(0.5).split_async().await?` | `Chunker::new().semantic(t).breakpoints(Breakpoints::Threshold(0.5)).embed(&client).await?` |
+| embedrs 0.6 `Client` | anything that implements `embedrs::Embed` 0.7 |
+
+`ChunkBuilder` and `SemanticChunkBuilder` are gone.
+
+### Added
+
+- `Chunk<'a>` borrows from the text: no copy of each chunk's text or
+  header path. `OwnedChunk` and `Chunk::to_owned_chunk` for chunks that
+  outlive the text; `Chunk::byte_range` and `Chunk::token_range`.
+- `chunkedrs::split(text)` for the defaults.
+- `Chunker::for_model`, `Chunker::for_encoding` and `Chunker::with_encoder`;
+  `Error::UnknownModel` and `Error::UnknownEncoding`.
+- `Chunker::split_with_tokens`: the chunks and the document's token ids.
+- Semantic splitting without I/O: `Chunker::semantic(text)` gives the
+  sentences to embed (`Semantic::inputs`, slices of the text, none longer
+  than `max_tokens`); `Semantic::finish(vectors, dim)` takes the vectors of
+  any model back. No feature and no dependency needed.
+- Feature `semantic`: `Semantic::embed`, `Chunker::split_semantic` and
+  `Chunker::split_semantic_batch` over any `embedrs::Embed`, remote or
+  local. The batch form makes one embedding call for every text's
+  sentences.
+- `Breakpoints::Percentile(p)` (the default, 95) and
+  `Breakpoints::Threshold(t)`.
+- A Japanese corpus in `bench-compare` and a test there that compares
+  every strategy with 2.2.0.
+
+### Changed
+
+- Faster: each chunk's count reuses the document's token ids between the
+  first and the last position where tiktoken 5.6 can cut the chunk
+  (`CoreBpe::next_cut`, `prev_cut`) and encodes only the two ends again.
+  The counts are the same as encoding the whole chunk. On an Apple M4 Pro,
+  one thread, `o200k_base`: 15 to 39% less time than 2.2 on every row of
+  the README table, a 200 KB English book at 512 tokens 0.37 ms to 0.23 ms,
+  180 KB of Japanese 0.27 ms to 0.20 ms. Separator matchers are built once
+  per split instead of once per markdown section.
+- Requires tiktoken 5.6. The `semantic` feature depends on embedrs 0.7
+  with its default features off, which has no dependencies.
+- Semantic splitting breaks at the 95th percentile of the document's
+  neighbour distances by default instead of at a fixed cosine similarity of
+  0.5, whose meaning depends on the model. A sentence longer than
+  `max_tokens` is cut before it is embedded, so no input is longer than a
+  chunk.
+- Authors and copyright holder: GOLIA K.K. and DoraCawl.
+
+### Removed
+
+- `chunk()`, `ChunkBuilder`, `SemanticChunkBuilder`, `Chunk::new` and the
+  `Chunk::with_*` setters.
+
 ## [2.2.0] - 2026-11-25
 
 ### Upgrading from 2.1

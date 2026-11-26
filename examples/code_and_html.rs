@@ -30,7 +30,7 @@ fn main() {
 ";
 
     println!("=== code() — splits on blank lines, then dedented block closers ===\n");
-    for chunk in chunkedrs::chunk(src).code().max_tokens(40).split() {
+    for chunk in chunkedrs::Chunker::new().code().max_tokens(40).split(src) {
         println!(
             "--- chunk {} ({} tokens) ---",
             chunk.index, chunk.token_count
@@ -50,7 +50,7 @@ fn html() {
 </article>";
 
     println!("=== html() — splits after block-level closing tags ===\n");
-    for chunk in chunkedrs::chunk(page).html().max_tokens(20).split() {
+    for chunk in chunkedrs::Chunker::new().html().max_tokens(20).split(page) {
         println!(
             "--- chunk {} ({} tokens) ---",
             chunk.index, chunk.token_count

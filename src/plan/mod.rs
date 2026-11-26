@@ -6,15 +6,21 @@
 //! tier that has one, or at a token boundary when no tier does. The chosen
 //! text is then counted on its own once, because BPE is not additive across a
 //! cut, and the window shrinks in the rare case that count is over budget.
+//! That count reuses the document's ids wherever it can (`verify.rs`).
+
+mod scan;
+mod verify;
 
 use crate::Chunk;
-use crate::scan::Scan;
+use scan::{Matcher, Scan};
 use tiktoken::CoreBpe;
 
 /// The document, its encoder, and where each of its tokens starts.
 pub(crate) struct Doc<'a> {
     pub text: &'a str,
     pub encoder: &'a CoreBpe,
+    /// The document's token ids.
+    pub tokens: Vec<u32>,
     /// `bounds[i]` is the byte offset at which token `i` starts; the last
     /// entry is the text length. A token can end inside a multi-byte
     /// character, so an entry is not always a char boundary.
@@ -28,17 +34,18 @@ impl<'a> Doc<'a> {
         let mut acc = 0usize;
         bounds.push(0);
         for &t in &tokens {
-            acc += crate::token_len(encoder, t);
+            acc += encoder.token_bytes(t).map_or(0, <[u8]>::len);
             bounds.push(acc);
         }
         Doc {
             text,
             encoder,
+            tokens,
             bounds,
         }
     }
 
-    fn tokens(&self) -> usize {
+    fn token_count(&self) -> usize {
         self.bounds.len() - 1
     }
 
@@ -49,6 +56,14 @@ impl<'a> Doc<'a> {
             .saturating_sub(1)
     }
 
+    /// Index of the token that starts at `byte`, which must be a token
+    /// boundary.
+    fn boundary(&self, byte: usize) -> usize {
+        let i = self.boundary_at_or_after(byte);
+        debug_assert_eq!(self.bounds[i], byte, "{byte} is not a token boundary");
+        i
+    }
+
     /// Index of the first token boundary at or after `byte`.
     fn boundary_at_or_after(&self, byte: usize) -> usize {
         self.bounds.partition_point(|&b| b < byte)
@@ -57,7 +72,7 @@ impl<'a> Doc<'a> {
     /// The token range covering `start..end`, widened where a boundary falls
     /// inside a token.
     fn span(&self, start: usize, end: usize) -> (usize, usize) {
-        let n = self.tokens();
+        let n = self.token_count();
         let first = self.token_at(start).min(n);
         let last = if end > start {
             self.boundary_at_or_after(end).min(n)
@@ -67,11 +82,17 @@ impl<'a> Doc<'a> {
         (first, last.max(first))
     }
 
+    /// Number of document tokens `start..end` touches.
+    pub fn span_width(&self, start: usize, end: usize) -> usize {
+        let (a, b) = self.span(start, end);
+        b - a
+    }
+
     /// A chunk for `piece`, with its token span in the document.
-    pub fn chunk(&self, piece: Piece, section_path: &[String]) -> Chunk {
+    pub fn chunk(&self, piece: Piece, section_path: &[&'a str]) -> Chunk<'a> {
         let (start_token, end_token) = self.span(piece.start, piece.end);
         Chunk {
-            content: self.text[piece.start..piece.end].to_string(),
+            content: &self.text[piece.start..piece.end],
             index: 0,
             start_byte: piece.start,
             end_byte: piece.end,
@@ -94,12 +115,16 @@ pub(crate) struct Piece {
 /// A separator tier: separators searched in the text, or cut positions a
 /// strategy found itself (absolute byte offsets, ascending).
 pub(crate) enum Tier {
-    Seps(&'static [&'static str]),
+    Seps(Box<Matcher>),
     Cuts(Vec<usize>),
 }
 
+/// The tiers of a separator ladder, built once per split: the markdown and
+/// semantic strategies plan many sections with the same ladder.
 pub(crate) fn tiers(seps: &'static [&'static [&'static str]]) -> Vec<Tier> {
-    seps.iter().map(|s| Tier::Seps(s)).collect()
+    seps.iter()
+        .map(|s| Tier::Seps(Box::new(Matcher::new(s))))
+        .collect()
 }
 
 fn floor_char_boundary(text: &str, i: usize) -> usize {
@@ -120,7 +145,7 @@ fn next_char_boundary(text: &str, i: usize) -> usize {
 
 struct Planner<'d> {
     doc: &'d Doc<'d>,
-    scans: Vec<Scan>,
+    scans: Vec<Scan<'d>>,
     hi: usize,
     max: usize,
 }
@@ -141,7 +166,7 @@ impl Planner<'_> {
         let text = doc.text;
         let one = next_char_boundary(text, floor);
         let t = doc.token_at(s);
-        let mut lim = doc.bounds[(t + self.max).min(doc.tokens())].min(self.hi);
+        let mut lim = doc.bounds[(t + self.max).min(doc.token_count())].min(self.hi);
         loop {
             let e = if lim >= self.hi {
                 self.hi
@@ -151,7 +176,7 @@ impl Planner<'_> {
                     if e <= floor { one } else { e }
                 })
             };
-            let n = doc.encoder.count(&text[s..e]);
+            let n = verify::count(doc, s, e);
             if n <= self.max || e <= one {
                 return (e, n);
             }
@@ -197,7 +222,7 @@ pub(crate) fn plan(
     let scans = tiers
         .iter()
         .map(|t| match t {
-            Tier::Seps(seps) => Scan::seps(seps, lo),
+            Tier::Seps(matcher) => Scan::seps(matcher, lo),
             Tier::Cuts(cuts) => Scan::fixed(cuts, lo, hi),
         })
         .collect();

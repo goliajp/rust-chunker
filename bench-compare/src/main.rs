@@ -13,7 +13,7 @@ use std::time::Instant;
 use text_splitter::{ChunkConfig, ChunkSizer, CodeSplitter, MarkdownSplitter, TextSplitter};
 
 type Enc = &'static tiktoken::CoreBpe;
-type Candidate = Box<dyn Fn(&str) -> Vec<String>>;
+type Candidate = Box<dyn for<'t> Fn(&'t str) -> Vec<&'t str>>;
 
 /// text-splitter sized by this repository's tokenizer instead of tiktoken-rs.
 struct Tiktoken(Enc);
@@ -29,7 +29,7 @@ fn quick() -> bool {
 }
 
 /// Median milliseconds per call over 9 rounds of about 150 ms each.
-fn median_ms(text: &str, f: &dyn Fn(&str) -> Vec<String>) -> f64 {
+fn median_ms(text: &str, f: &dyn for<'t> Fn(&'t str) -> Vec<&'t str>) -> f64 {
     let t0 = Instant::now();
     std::hint::black_box(f(text));
     let first = t0.elapsed().as_secs_f64();
@@ -51,11 +51,11 @@ fn median_ms(text: &str, f: &dyn Fn(&str) -> Vec<String>) -> f64 {
     rounds[4]
 }
 
-fn check(text: &str, chunks: &[String], enc: Enc, max: usize) -> String {
+fn check(text: &str, chunks: &[&str], enc: Enc, max: usize) -> String {
     let counts: Vec<usize> = chunks.iter().map(|c| enc.count(c)).collect();
     let over = counts.iter().filter(|&&c| c > max).count();
     let largest = counts.iter().copied().max().unwrap_or(0);
-    let bytes: usize = chunks.iter().map(String::len).sum();
+    let bytes: usize = chunks.iter().map(|c| c.len()).sum();
     format!(
         "chunks={:>5} over={:>2} largest={:>4} bytes/doc={:.3}",
         chunks.len(),
@@ -65,12 +65,26 @@ fn check(text: &str, chunks: &[String], enc: Enc, max: usize) -> String {
     )
 }
 
-fn chunked<'a>(text: &'a str, enc: &'static str, max: usize) -> chunkedrs::ChunkBuilder<'a> {
-    chunkedrs::chunk(text).encoding(enc).max_tokens(max)
+fn chunked(enc: &str, max: usize) -> chunkedrs::Chunker {
+    chunkedrs::Chunker::for_encoding(enc)
+        .unwrap()
+        .max_tokens(max)
 }
 
-fn contents(chunks: Vec<chunkedrs::Chunk>) -> Vec<String> {
+fn contents<'t>(chunks: Vec<chunkedrs::Chunk<'t>>) -> Vec<&'t str> {
     chunks.into_iter().map(|c| c.content).collect()
+}
+
+fn chunked22<'a>(text: &'a str, enc: &'static str, max: usize) -> chunkedrs22::ChunkBuilder<'a> {
+    chunkedrs22::chunk(text).encoding(enc).max_tokens(max)
+}
+
+/// 2.2 returns owned chunks; slice the text by their byte ranges.
+fn contents22(text: &str, chunks: Vec<chunkedrs22::Chunk>) -> Vec<&str> {
+    chunks
+        .into_iter()
+        .map(|c| &text[c.start_byte..c.end_byte])
+        .collect()
 }
 
 fn candidates(corpus: &str, enc_name: &'static str, max: usize) -> Vec<(&'static str, Candidate)> {
@@ -83,49 +97,64 @@ fn candidates(corpus: &str, enc_name: &'static str, max: usize) -> Vec<(&'static
     let mut out: Vec<(&'static str, Candidate)> = vec![
         (
             "floor: one tiktoken encode",
-            Box::new(move |t| vec![enc.encode(t).len().to_string()]),
+            Box::new(move |t| {
+                std::hint::black_box(enc.encode(t));
+                Vec::new()
+            }),
         ),
         (
             "chunkedrs",
-            Box::new(move |t| contents(chunked(t, enc_name, max).split())),
+            Box::new(move |t| contents(chunked(enc_name, max).split(t))),
+        ),
+        (
+            "chunkedrs 2.2.0",
+            Box::new(move |t| contents22(t, chunked22(t, enc_name, max).split())),
         ),
         ("text-splitter + tiktoken-rs", {
             let s = TextSplitter::new(ChunkConfig::new(max).with_sizer(rs));
-            Box::new(move |t| s.chunks(t).map(str::to_owned).collect())
+            Box::new(move |t| s.chunks(t).collect())
         }),
         ("text-splitter + tiktoken", {
             let s = TextSplitter::new(ChunkConfig::new(max).with_sizer(Tiktoken(enc)));
-            Box::new(move |t| s.chunks(t).map(str::to_owned).collect())
+            Box::new(move |t| s.chunks(t).collect())
         }),
     ];
     if corpus.ends_with(".md") {
         out.push((
             "chunkedrs markdown",
-            Box::new(move |t| contents(chunked(t, enc_name, max).markdown().split())),
+            Box::new(move |t| contents(chunked(enc_name, max).markdown().split(t))),
+        ));
+        out.push((
+            "chunkedrs 2.2.0 markdown",
+            Box::new(move |t| contents22(t, chunked22(t, enc_name, max).markdown().split())),
         ));
         out.push(("text-splitter markdown + tiktoken-rs", {
             let s = MarkdownSplitter::new(ChunkConfig::new(max).with_sizer(rs));
-            Box::new(move |t| s.chunks(t).map(str::to_owned).collect())
+            Box::new(move |t| s.chunks(t).collect())
         }));
         out.push(("text-splitter markdown + tiktoken", {
             let s = MarkdownSplitter::new(ChunkConfig::new(max).with_sizer(Tiktoken(enc)));
-            Box::new(move |t| s.chunks(t).map(str::to_owned).collect())
+            Box::new(move |t| s.chunks(t).collect())
         }));
     }
     if corpus.starts_with("code") {
         out.push((
             "chunkedrs code",
-            Box::new(move |t| contents(chunked(t, enc_name, max).code().split())),
+            Box::new(move |t| contents(chunked(enc_name, max).code().split(t))),
+        ));
+        out.push((
+            "chunkedrs 2.2.0 code",
+            Box::new(move |t| contents22(t, chunked22(t, enc_name, max).code().split())),
         ));
         out.push(("text-splitter code(rust) + tiktoken-rs", {
             let cfg = ChunkConfig::new(max).with_sizer(rs);
             let s = CodeSplitter::new(tree_sitter_rust::LANGUAGE, cfg).unwrap();
-            Box::new(move |t| s.chunks(t).map(str::to_owned).collect())
+            Box::new(move |t| s.chunks(t).collect())
         }));
         out.push(("text-splitter code(rust) + tiktoken", {
             let cfg = ChunkConfig::new(max).with_sizer(Tiktoken(enc));
             let s = CodeSplitter::new(tree_sitter_rust::LANGUAGE, cfg).unwrap();
-            Box::new(move |t| s.chunks(t).map(str::to_owned).collect())
+            Box::new(move |t| s.chunks(t).collect())
         }));
     }
     out
@@ -146,23 +175,29 @@ fn batch(dir: &str, corpora: &[&str]) {
         "\n## batch: {} documents, {bytes} B, o200k_base max_tokens=512",
         docs.len()
     );
-    let one = |_: &str| -> Vec<String> {
-        let n: usize = docs.iter().map(|d| chunker.split(d).len()).sum();
-        vec![n.to_string()]
+    let one: &dyn for<'t> Fn(&'t str) -> Vec<&'t str> = &|_| {
+        std::hint::black_box(docs.iter().map(|d| chunker.split(d).len()).sum::<usize>());
+        Vec::new()
     };
-    let many = |_: &str| -> Vec<String> {
-        let n: usize = chunker.split_batch(&docs).iter().map(Vec::len).sum();
-        vec![n.to_string()]
+    let many: &dyn for<'t> Fn(&'t str) -> Vec<&'t str> = &|_| {
+        std::hint::black_box(
+            chunker
+                .split_batch(&docs)
+                .iter()
+                .map(Vec::len)
+                .sum::<usize>(),
+        );
+        Vec::new()
     };
     println!(
         "{:<40} {:>9.3} ms",
         "Chunker::split, one by one",
-        median_ms("", &one)
+        median_ms("", one)
     );
     println!(
         "{:<40} {:>9.3} ms",
         "Chunker::split_batch",
-        median_ms("", &many)
+        median_ms("", many)
     );
 }
 
@@ -176,6 +211,7 @@ fn main() {
     let corpora = [
         "book_en.txt",
         "zh_xiyouji.md",
+        "ja_neko.txt",
         "md_rust_book.md",
         "code_rust.txt",
     ];

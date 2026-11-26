@@ -40,9 +40,9 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # The slim build is the one that rots silently: an encoding whose
-      # vocabulary is not compiled in does not fail to build, it falls back to
-      # o200k_base at run time. Only tests catch that, so run them.
+      # A slim build drops encodings at run time, not at build time:
+      # Chunker::for_encoding returns an error for one that is not compiled
+      # in. Only tests see that, so run them.
       - name: o200k_base only
         run: cargo test --no-default-features
       - name: one vendor group on top of the floor
@@ -51,6 +51,11 @@ jobs:
         run: cargo test --no-default-features --features vocab-cl100k_base
       - name: a vocabulary added in tiktoken 5
         run: cargo test --no-default-features --features vocab-qwen3_5
+      # the semantic tests run all-MiniLM-L6-v2 (91 MB) on the CPU
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-all-MiniLM-L6-v2
       - name: everything, including semantic
         run: cargo test --all-features
 

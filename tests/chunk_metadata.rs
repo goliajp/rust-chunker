@@ -6,7 +6,7 @@
 #[test]
 fn token_spans_are_monotonic_and_cover_the_document() {
     let text = "Alpha beta gamma. Delta epsilon zeta. Eta theta iota. Kappa lambda mu.";
-    let chunks = chunkedrs::chunk(text).max_tokens(6).split();
+    let chunks = chunkedrs::Chunker::new().max_tokens(6).split(text);
     assert!(chunks.len() >= 2);
 
     let total = tiktoken::get_encoding("o200k_base").unwrap().count(text);
@@ -58,7 +58,7 @@ fn token_spans_are_monotonic_and_cover_the_document() {
 #[test]
 fn spans_overlap_by_the_token_that_straddles_a_boundary() {
     let text = "Alpha beta gamma. Delta epsilon zeta. Eta theta iota. Kappa lambda mu.";
-    let chunks = chunkedrs::chunk(text).max_tokens(6).split();
+    let chunks = chunkedrs::Chunker::new().max_tokens(6).split(text);
 
     let straddling = chunks
         .windows(2)
@@ -87,7 +87,7 @@ fn token_span_covers_the_chunk_content() {
     let enc = tiktoken::get_encoding("o200k_base").unwrap();
     let doc_tokens = enc.encode(text);
 
-    for c in chunkedrs::chunk(text).max_tokens(5).split() {
+    for c in chunkedrs::Chunker::new().max_tokens(5).split(text) {
         let span = enc.decode(&doc_tokens[c.start_token..c.end_token]);
         let span = String::from_utf8_lossy(&span);
         assert!(
@@ -107,10 +107,10 @@ fn token_span_covers_the_chunk_content() {
 fn token_count_is_measured_on_the_chunk_itself() {
     let enc = tiktoken::get_encoding("o200k_base").unwrap();
     let text = "Paragraph one here.\n\nParagraph two here.\n\nParagraph three here.";
-    for c in chunkedrs::chunk(text).max_tokens(8).split() {
+    for c in chunkedrs::Chunker::new().max_tokens(8).split(text) {
         assert_eq!(
             c.token_count,
-            enc.count(&c.content),
+            enc.count(c.content),
             "chunk {} token_count must equal a fresh count of its own content",
             c.index
         );
@@ -121,7 +121,7 @@ fn token_count_is_measured_on_the_chunk_itself() {
 fn token_spans_are_present_for_cjk() {
     let zh = "第一句在这里。第二句在这里。第三句在这里。第四句在这里。";
     let total = tiktoken::get_encoding("o200k_base").unwrap().count(zh);
-    let chunks = chunkedrs::chunk(zh).max_tokens(8).split();
+    let chunks = chunkedrs::Chunker::new().max_tokens(8).split(zh);
     assert_eq!(chunks[0].start_token, 0);
     assert_eq!(chunks.last().unwrap().end_token, total);
 }
@@ -148,7 +148,7 @@ Source text.
 
 Usage text.
 ";
-    let chunks = chunkedrs::chunk(md).markdown().split();
+    let chunks = chunkedrs::Chunker::new().markdown().split(md);
 
     let find = |needle: &str| {
         chunks
@@ -178,21 +178,18 @@ Usage text.
 #[test]
 fn section_returns_the_deepest_header() {
     let md = "# Top\n\nA.\n\n## Nested\n\nB.\n";
-    let chunks = chunkedrs::chunk(md).markdown().split();
+    let chunks = chunkedrs::Chunker::new().markdown().split(md);
 
     let nested = chunks.iter().find(|c| c.content.contains('B')).unwrap();
     assert_eq!(nested.section(), Some("## Nested"));
-    assert_eq!(
-        nested.section_path.last().map(String::as_str),
-        nested.section()
-    );
+    assert_eq!(nested.section_path.last().copied(), nested.section());
 }
 
 /// Content before any header has an empty path, not a phantom one.
 #[test]
 fn preamble_has_no_section_path() {
     let md = "Preamble here.\n\n# First\n\nBody.\n";
-    let chunks = chunkedrs::chunk(md).markdown().split();
+    let chunks = chunkedrs::Chunker::new().markdown().split(md);
     let preamble = chunks
         .iter()
         .find(|c| c.content.contains("Preamble"))
@@ -215,7 +212,7 @@ Subsection
 
 Body.
 ";
-    let chunks = chunkedrs::chunk(md).markdown().split();
+    let chunks = chunkedrs::Chunker::new().markdown().split(md);
     let body = chunks.iter().find(|c| c.content.contains("Body")).unwrap();
     assert_eq!(body.section_path, vec!["Title", "Subsection"]);
 }
@@ -224,7 +221,7 @@ Body.
 #[test]
 fn skipped_header_levels_do_not_panic() {
     let md = "# One\n\nA.\n\n### Three\n\nB.\n\n## Two\n\nC.\n";
-    let chunks = chunkedrs::chunk(md).markdown().split();
+    let chunks = chunkedrs::Chunker::new().markdown().split(md);
     let b = chunks.iter().find(|c| c.content.contains('B')).unwrap();
     assert_eq!(b.section_path, vec!["# One", "### Three"]);
     let c = chunks.iter().find(|c| c.content.contains('C')).unwrap();
@@ -234,25 +231,22 @@ fn skipped_header_levels_do_not_panic() {
 /// Non-markdown strategies leave the path empty rather than guessing.
 #[test]
 fn recursive_strategy_has_no_section_path() {
-    for c in chunkedrs::chunk("plain text here").split() {
+    for c in chunkedrs::Chunker::new().split("plain text here") {
         assert!(c.section_path.is_empty());
         assert_eq!(c.section(), None);
     }
 }
 
-/// `Chunk` is `#[non_exhaustive]`, so downstream code needs a way to build one
-/// — for tests, and for adapters that re-materialise chunks from storage.
+/// `OwnedChunk` is `#[non_exhaustive]`; code that re-materialises chunks from
+/// storage starts from `Default` and sets the public fields.
 #[test]
-fn chunk_can_be_constructed_downstream() {
-    let c = chunkedrs::Chunk::new("hello")
-        .with_index(3)
-        .with_bytes(10, 15)
-        .with_tokens(2, 4)
-        .with_section_path(vec!["# Title".to_string()]);
-
-    assert_eq!(c.content, "hello");
-    assert_eq!(c.index, 3);
-    assert_eq!((c.start_byte, c.end_byte), (10, 15));
-    assert_eq!((c.start_token, c.end_token), (2, 4));
+fn owned_chunk_can_be_built_downstream() {
+    let mut c = chunkedrs::OwnedChunk::default();
+    c.content = "hello".into();
+    c.index = 3;
+    (c.start_byte, c.end_byte) = (10, 15);
+    (c.start_token, c.end_token) = (2, 4);
+    c.section_path = vec!["# Title".into()];
     assert_eq!(c.section(), Some("# Title"));
+    assert_eq!(c.to_string(), "hello");
 }

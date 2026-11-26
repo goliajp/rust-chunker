@@ -1,7 +1,7 @@
 //! Separator cuts, found by one forward pass per tier over the planned range
 //! and only as far as the planner has asked for.
 
-use crate::recursive::absorb_trailing;
+use crate::strategy::recursive::absorb_trailing;
 
 /// Separators grouped by their first byte, longest first in each group, so
 /// the first that matches is the longest.
@@ -14,7 +14,7 @@ pub(crate) struct Matcher {
 }
 
 impl Matcher {
-    fn new(seps: &[&'static str]) -> Self {
+    pub(crate) fn new(seps: &[&'static str]) -> Self {
         let mut first = [0u8; 256];
         let mut groups: Vec<Vec<&'static [u8]>> = Vec::new();
         for sep in seps {
@@ -59,29 +59,28 @@ impl Matcher {
 /// match every few dozen bytes in prose, so they are searched backwards from
 /// the window's end, which stops at the first match instead of reading the
 /// whole window.
-pub(crate) enum Scan {
+pub(crate) enum Scan<'m> {
     Fixed(Vec<usize>),
-    Back(Box<Matcher>),
+    Back(&'m Matcher),
     Seps {
-        matcher: Box<Matcher>,
+        matcher: &'m Matcher,
         cuts: Vec<usize>,
         /// Bytes before this offset have been scanned.
         pos: usize,
     },
 }
 
-impl Scan {
+impl<'m> Scan<'m> {
     pub fn fixed(cuts: &[usize], lo: usize, hi: usize) -> Self {
         Scan::Fixed(cuts.iter().copied().filter(|&c| c > lo && c < hi).collect())
     }
 
-    pub fn seps(seps: &[&'static str], lo: usize) -> Self {
-        let matcher = Matcher::new(seps);
+    pub fn seps(matcher: &'m Matcher, lo: usize) -> Self {
         if !matcher.newline {
-            return Scan::Back(Box::new(matcher));
+            return Scan::Back(matcher);
         }
         Scan::Seps {
-            matcher: Box::new(matcher),
+            matcher,
             cuts: Vec::new(),
             pos: lo,
         }
@@ -187,8 +186,8 @@ fn extend(m: &Matcher, text: &str, mut pos: usize, until: usize, cuts: &mut Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::code::CODE_TIERS;
-    use crate::recursive::{TEXT_TIERS, split_at_any};
+    use crate::strategy::code::CODE_TIERS;
+    use crate::strategy::recursive::{TEXT_TIERS, split_at_any};
 
     /// Piece ends of the plain splitter on `text[lo..]`, minus the end.
     fn reference(text: &str, lo: usize, seps: &[&str]) -> Vec<usize> {
@@ -229,7 +228,8 @@ mod tests {
             for tier in TEXT_TIERS.iter().chain(CODE_TIERS) {
                 let want = reference(&text, 0, tier);
                 // ask in small steps, as the planner does
-                let mut scan = Scan::seps(tier, 0);
+                let matcher = Matcher::new(tier);
+                let mut scan = Scan::seps(&matcher, 0);
                 let mut got = Vec::new();
                 for lim in 1..=text.len() {
                     if let Some(c) = scan.last_in(&text, text.len(), 0, 0, lim)
@@ -250,7 +250,8 @@ mod tests {
         for lim in 0..=text.len() {
             for floor in 0..lim {
                 let want = ends.iter().copied().rfind(|&e| e <= lim && e > floor);
-                let mut scan = Scan::seps(TEXT_TIERS[2], 0);
+                let matcher = Matcher::new(TEXT_TIERS[2]);
+                let mut scan = Scan::seps(&matcher, 0);
                 assert_eq!(scan.last_in(text, text.len(), 0, floor, lim), want);
             }
         }

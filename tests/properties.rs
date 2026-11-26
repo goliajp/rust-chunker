@@ -129,17 +129,24 @@ enum Strategy {
     Html,
 }
 
-fn split(text: &str, strategy: Strategy, max: usize, overlap: usize, enc: &str) -> Vec<Chunk> {
-    let b = chunkedrs::chunk(text)
+fn split<'a>(
+    text: &'a str,
+    strategy: Strategy,
+    max: usize,
+    overlap: usize,
+    enc: &str,
+) -> Vec<Chunk<'a>> {
+    let b = chunkedrs::Chunker::for_encoding(enc)
+        .unwrap()
         .max_tokens(max)
-        .overlap(overlap)
-        .encoding(enc);
-    match strategy {
-        Strategy::Recursive => b.split(),
-        Strategy::Markdown => b.markdown().split(),
-        Strategy::Code => b.code().split(),
-        Strategy::Html => b.html().split(),
-    }
+        .overlap(overlap);
+    let b = match strategy {
+        Strategy::Recursive => b,
+        Strategy::Markdown => b.markdown(),
+        Strategy::Code => b.code(),
+        Strategy::Html => b.html(),
+    };
+    b.split(text)
 }
 
 fn is_underline(line: &str) -> bool {
@@ -199,7 +206,7 @@ fn check(text: &str, strategy: Strategy, max: usize, overlap: usize, enc_name: &
 
         // budget: a single character that takes more tokens than the budget
         // cannot be split further, and is the only allowed excess
-        let actual = enc.count(&c.content);
+        let actual = enc.count(c.content);
         assert_eq!(c.token_count, actual, "{}: chunk {i} stored count", ctx());
         assert!(
             actual <= max || c.content.chars().count() == 1,

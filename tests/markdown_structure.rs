@@ -5,7 +5,7 @@
 //! as one — most damagingly the comment lines inside fenced code blocks, which
 //! appear in essentially every technical document.
 
-fn sections(chunks: &[chunkedrs::Chunk]) -> Vec<Option<&str>> {
+fn sections<'a>(chunks: &[chunkedrs::Chunk<'a>]) -> Vec<Option<&'a str>> {
     chunks.iter().map(|c| c.section()).collect()
 }
 
@@ -24,7 +24,7 @@ print('hi')
 
 After the fence.
 ";
-    let chunks = chunkedrs::chunk(md).markdown().split();
+    let chunks = chunkedrs::Chunker::new().markdown().split(md);
 
     assert!(
         !sections(&chunks).contains(&Some("# this is a comment, not a header")),
@@ -54,7 +54,7 @@ cargo install chunkedrs
 
 Done.
 ";
-    let chunks = chunkedrs::chunk(md).markdown().split();
+    let chunks = chunkedrs::Chunker::new().markdown().split(md);
     assert!(
         sections(&chunks)
             .iter()
@@ -76,7 +76,7 @@ fn tilde_fences_are_respected() {
 
 Body.
 ";
-    let chunks = chunkedrs::chunk(md).markdown().split();
+    let chunks = chunkedrs::Chunker::new().markdown().split(md);
     assert!(
         sections(&chunks).iter().all(|s| *s == Some("# Title")),
         "tilde fence not honoured: {:?}",
@@ -99,7 +99,7 @@ fn longer_fences_are_not_closed_by_shorter_runs() {
 
 Tail.
 ";
-    let chunks = chunkedrs::chunk(md).markdown().split();
+    let chunks = chunkedrs::Chunker::new().markdown().split(md);
     assert!(
         sections(&chunks).iter().all(|s| *s == Some("# Outer")),
         "a shorter run closed a longer fence: {:?}",
@@ -119,7 +119,7 @@ fn indented_fences_are_respected() {
 
 Body.
 ";
-    let chunks = chunkedrs::chunk(md).markdown().split();
+    let chunks = chunkedrs::Chunker::new().markdown().split(md);
     assert!(
         sections(&chunks).iter().all(|s| *s == Some("# Title")),
         "indented fence not honoured: {:?}",
@@ -136,7 +136,7 @@ fn unclosed_fence_does_not_resume_header_detection() {
 ```
 # never closed
 ";
-    let chunks = chunkedrs::chunk(md).markdown().split();
+    let chunks = chunkedrs::Chunker::new().markdown().split(md);
     assert!(
         sections(&chunks).iter().all(|s| *s == Some("# Title")),
         "header detection resumed inside an unclosed fence: {:?}",
@@ -159,7 +159,7 @@ fn headers_after_a_closed_fence_still_register() {
 
 Content under second.
 ";
-    let chunks = chunkedrs::chunk(md).markdown().split();
+    let chunks = chunkedrs::Chunker::new().markdown().split(md);
     let s = sections(&chunks);
     assert!(
         s.contains(&Some("## Second")),
@@ -185,7 +185,7 @@ A Subsection
 
 More text.
 ";
-    let chunks = chunkedrs::chunk(md).markdown().split();
+    let chunks = chunkedrs::Chunker::new().markdown().split(md);
     let s = sections(&chunks);
     assert!(
         s.contains(&Some("Document Title")),
@@ -211,7 +211,7 @@ author: Someone
 
 Body text.
 ";
-    let chunks = chunkedrs::chunk(md).markdown().split();
+    let chunks = chunkedrs::Chunker::new().markdown().split(md);
     let s = sections(&chunks);
     assert!(
         !s.contains(&Some("author: Someone")),
@@ -240,7 +240,7 @@ let x = 1;
 
 Body two.
 ";
-    for c in chunkedrs::chunk(md).markdown().split() {
+    for c in chunkedrs::Chunker::new().markdown().split(md) {
         assert_eq!(
             &md[c.start_byte..c.end_byte],
             c.content,

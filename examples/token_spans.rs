@@ -8,9 +8,9 @@
 // chunk's vector over its own slice of the token stream. Every chunk embedding
 // then carries the context of the document around it.
 //
-// The part chunkedrs supplies is the slice. `start_token..end_token` locates
-// each chunk in `encoder.encode(whole_document)` — no re-tokenizing, no
-// guessing where a chunk landed.
+// The part chunkedrs supplies is the slice. `split_with_tokens` returns the
+// document's token ids with the chunks, and `start_token..end_token` locates
+// each chunk in them: no re-tokenizing, no guessing where a chunk landed.
 
 fn main() {
     let doc = "\
@@ -23,11 +23,10 @@ immutable borrows or one mutable borrow. Borrows must not outlive the owner.
 The cost is a learning curve. The benefit is that data races become compile \
 errors instead of production incidents.";
 
-    let chunks = chunkedrs::chunk(doc).max_tokens(40).split();
-
-    // this is the tokenization a late-chunking pipeline would feed its encoder
-    let encoder = tiktoken::get_encoding("o200k_base").unwrap();
-    let document_tokens = encoder.encode(doc);
+    // the ids are the tokenization a late-chunking pipeline feeds its model
+    let (chunks, document_tokens) = chunkedrs::Chunker::new()
+        .max_tokens(40)
+        .split_with_tokens(doc);
 
     println!(
         "document: {} bytes, {} tokens, {} chunks\n",
