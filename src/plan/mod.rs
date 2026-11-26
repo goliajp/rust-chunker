@@ -12,7 +12,7 @@ mod scan;
 mod verify;
 
 use crate::Chunk;
-use scan::Scan;
+use scan::{Matcher, Scan};
 use tiktoken::CoreBpe;
 
 /// The document, its encoder, and where each of its tokens starts.
@@ -115,12 +115,16 @@ pub(crate) struct Piece {
 /// A separator tier: separators searched in the text, or cut positions a
 /// strategy found itself (absolute byte offsets, ascending).
 pub(crate) enum Tier {
-    Seps(&'static [&'static str]),
+    Seps(Box<Matcher>),
     Cuts(Vec<usize>),
 }
 
+/// The tiers of a separator ladder, built once per split: the markdown and
+/// semantic strategies plan many sections with the same ladder.
 pub(crate) fn tiers(seps: &'static [&'static [&'static str]]) -> Vec<Tier> {
-    seps.iter().map(|s| Tier::Seps(s)).collect()
+    seps.iter()
+        .map(|s| Tier::Seps(Box::new(Matcher::new(s))))
+        .collect()
 }
 
 fn floor_char_boundary(text: &str, i: usize) -> usize {
@@ -141,7 +145,7 @@ fn next_char_boundary(text: &str, i: usize) -> usize {
 
 struct Planner<'d> {
     doc: &'d Doc<'d>,
-    scans: Vec<Scan>,
+    scans: Vec<Scan<'d>>,
     hi: usize,
     max: usize,
 }
@@ -218,7 +222,7 @@ pub(crate) fn plan(
     let scans = tiers
         .iter()
         .map(|t| match t {
-            Tier::Seps(seps) => Scan::seps(seps, lo),
+            Tier::Seps(matcher) => Scan::seps(matcher, lo),
             Tier::Cuts(cuts) => Scan::fixed(cuts, lo, hi),
         })
         .collect();
