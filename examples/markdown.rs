@@ -40,7 +40,10 @@ of tokens. The library uses tiktoken for precise BPE token counting, supporting 
 the vocabularies of GPT-4o, Llama, Qwen, DeepSeek and other open models.
 ";
 
-    let chunks = chunkedrs::chunk(document).markdown().max_tokens(40).split();
+    let chunks = chunkedrs::Chunker::new()
+        .markdown()
+        .max_tokens(40)
+        .split(document);
 
     println!(
         "input: {} bytes, split into {} chunks\n",

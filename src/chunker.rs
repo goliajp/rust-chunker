@@ -1,11 +1,9 @@
-use crate::Chunk;
-use crate::builder::{Strategy, resolve, run};
+use crate::plan::Doc;
+use crate::strategy::{self, Strategy};
+use crate::{Chunk, Error, Result};
 
-/// A configured splitter to reuse across documents.
-///
-/// [`chunk()`](crate::chunk) configures one split of one text. A `Chunker`
-/// holds the same settings, with the encoder resolved once, and splits any
-/// number of texts, one at a time or as a batch on several threads.
+/// A splitter: encoding, token budget, overlap and strategy, set once and
+/// used for any number of texts.
 ///
 /// ```rust
 /// let chunker = chunkedrs::Chunker::new().max_tokens(64).markdown();
@@ -20,9 +18,9 @@ use crate::builder::{Strategy, resolve, run};
 /// ```
 #[derive(Clone, Copy)]
 pub struct Chunker {
-    encoder: &'static tiktoken::CoreBpe,
-    max_tokens: usize,
-    overlap: usize,
+    pub(crate) encoder: &'static tiktoken::CoreBpe,
+    pub(crate) max_tokens: usize,
+    pub(crate) overlap: usize,
     strategy: Strategy,
 }
 
@@ -43,84 +41,161 @@ impl Default for Chunker {
 }
 
 impl Chunker {
-    /// Recursive splitting, 512 max tokens, no overlap, `o200k_base`: the
-    /// same defaults as [`chunk()`](crate::chunk).
+    /// `o200k_base` (GPT-4o, GPT-5, o-series), 512 tokens per chunk, no
+    /// overlap, recursive splitting.
+    #[must_use]
     pub fn new() -> Self {
+        Self::with_encoder(
+            tiktoken::get_encoding("o200k_base").expect("o200k_base is always built"),
+        )
+    }
+
+    /// The defaults of [`new`](Self::new) with an encoder you already hold.
+    ///
+    /// ```rust
+    /// let enc = tiktoken::get_encoding("o200k_base").unwrap();
+    /// let chunker = chunkedrs::Chunker::with_encoder(enc);
+    /// ```
+    #[must_use]
+    pub fn with_encoder(encoder: &'static tiktoken::CoreBpe) -> Self {
         Chunker {
-            encoder: resolve(None, None),
+            encoder,
             max_tokens: 512,
             overlap: 0,
             strategy: Strategy::Recursive,
         }
     }
 
-    /// Maximum tokens per chunk; see [`ChunkBuilder::max_tokens`](crate::ChunkBuilder::max_tokens).
+    /// The defaults of [`new`](Self::new) with the encoding of a model name,
+    /// as tiktoken maps it (an encoding name is accepted too).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnknownModel`] when tiktoken maps the name to nothing, or to
+    /// an encoding whose `vocab-*` feature this build does not enable.
+    ///
+    /// ```rust
+    /// let chunker = chunkedrs::Chunker::for_model("gpt-4o")?;
+    /// assert!(chunkedrs::Chunker::for_model("no-such-model").is_err());
+    /// # Ok::<(), chunkedrs::Error>(())
+    /// ```
+    pub fn for_model(model: &str) -> Result<Self> {
+        tiktoken::encoding_for_model(model)
+            .or_else(|| tiktoken::get_encoding(model))
+            .map(Self::with_encoder)
+            .ok_or_else(|| Error::UnknownModel(model.to_owned()))
+    }
+
+    /// The defaults of [`new`](Self::new) with an encoding by name.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnknownEncoding`] for a name tiktoken does not know, or one
+    /// whose `vocab-*` feature this build does not enable.
+    ///
+    /// ```rust
+    /// let chunker = chunkedrs::Chunker::for_encoding("o200k_base")?;
+    /// # Ok::<(), chunkedrs::Error>(())
+    /// ```
+    pub fn for_encoding(name: &str) -> Result<Self> {
+        tiktoken::get_encoding(name)
+            .map(Self::with_encoder)
+            .ok_or_else(|| Error::UnknownEncoding(name.to_owned()))
+    }
+
+    /// Maximum tokens per chunk, counted on the chunk's own text. Default
+    /// 512; 0 is taken as 1.
+    ///
+    /// Every chunk holds at most this many tokens. The one exception is a
+    /// single character that alone needs more tokens than the budget.
     #[must_use]
     pub fn max_tokens(mut self, n: usize) -> Self {
         self.max_tokens = n.max(1);
         self
     }
 
-    /// Tokens shared by consecutive chunks; see [`ChunkBuilder::overlap`](crate::ChunkBuilder::overlap).
+    /// About this many tokens of the end of each chunk start the next one.
+    /// Default 0.
+    ///
+    /// The overlap starts on a char boundary and is at most `max_tokens - 1`
+    /// tokens, so every chunk adds new text; a chunk never starts before the
+    /// previous one.
     #[must_use]
     pub fn overlap(mut self, tokens: usize) -> Self {
         self.overlap = tokens;
         self
     }
 
-    /// The encoder for a model name, resolved now; see
-    /// [`ChunkBuilder::model`](crate::ChunkBuilder::model) for the fallback.
-    #[must_use]
-    pub fn model(mut self, model: &str) -> Self {
-        self.encoder = resolve(None, Some(model));
-        self
-    }
-
-    /// The encoder for an encoding name, resolved now; see
-    /// [`ChunkBuilder::encoding`](crate::ChunkBuilder::encoding) for the fallback.
-    #[must_use]
-    pub fn encoding(mut self, encoding: &str) -> Self {
-        self.encoder = resolve(Some(encoding), None);
-        self
-    }
-
-    /// Split on paragraphs, lines, sentences, clauses and words (the default).
+    /// Split on paragraphs, lines, sentences (CJK marks included), clauses
+    /// and words, then tokens. The default.
     #[must_use]
     pub fn recursive(mut self) -> Self {
         self.strategy = Strategy::Recursive;
         self
     }
 
-    /// Markdown-aware splitting; see [`ChunkBuilder::markdown`](crate::ChunkBuilder::markdown).
+    /// Split at ATX and setext headers first, and record each chunk's header
+    /// ancestry in [`Chunk::section_path`]. Fenced code blocks and front
+    /// matter are not read as headers. Header lines are not part of any
+    /// chunk's text.
     #[must_use]
     pub fn markdown(mut self) -> Self {
         self.strategy = Strategy::Markdown;
         self
     }
 
-    /// Code-aware splitting; see [`ChunkBuilder::code`](crate::ChunkBuilder::code).
+    /// Split source code at blank lines, then at brackets closing a block at
+    /// column 0, then lines and words. Boundary-aware, not a parser: it
+    /// works for any language and reads no grammar.
     #[must_use]
     pub fn code(mut self) -> Self {
         self.strategy = Strategy::Code;
         self
     }
 
-    /// HTML-aware splitting; see [`ChunkBuilder::html`](crate::ChunkBuilder::html).
+    /// Split HTML after block-level closing tags (`</p>`, `</li>`, `</tr>`,
+    /// ...), then by the recursive ladder. Boundary-aware, not a DOM parser.
     #[must_use]
     pub fn html(mut self) -> Self {
         self.strategy = Strategy::Html;
         self
     }
 
+    /// The encoder this chunker counts with.
+    #[must_use]
+    pub fn encoder(&self) -> &'static tiktoken::CoreBpe {
+        self.encoder
+    }
+
     /// Split one text.
-    pub fn split(&self, text: &str) -> Vec<Chunk> {
-        run(
-            text,
-            self.encoder,
-            self.strategy,
-            self.max_tokens,
-            self.overlap,
-        )
+    ///
+    /// ```rust
+    /// let chunks = chunkedrs::Chunker::new().max_tokens(8).split("One. Two. Three. Four.");
+    /// assert!(chunks.iter().all(|c| c.token_count <= 8));
+    /// ```
+    #[must_use]
+    pub fn split<'a>(&self, text: &'a str) -> Vec<Chunk<'a>> {
+        self.split_doc(&Doc::new(text, self.encoder))
+    }
+
+    /// Split one text and return its token ids too, the ids
+    /// `start_token..end_token` index. For late chunking: run the
+    /// embedding model over these ids once, then pool each chunk's span.
+    ///
+    /// ```rust
+    /// let text = "First sentence here. Second sentence here.";
+    /// let chunker = chunkedrs::Chunker::new().max_tokens(5);
+    /// let (chunks, ids) = chunker.split_with_tokens(text);
+    /// assert_eq!(ids, chunker.encoder().encode(text));
+    /// for c in &chunks {
+    ///     assert!(!ids[c.start_token..c.end_token].is_empty());
+    /// }
+    /// ```
+    #[must_use]
+    pub fn split_with_tokens<'a>(&self, text: &'a str) -> (Vec<Chunk<'a>>, Vec<u32>) {
+        let doc = Doc::new(text, self.encoder);
+        let chunks = self.split_doc(&doc);
+        (chunks, doc.tokens)
     }
 
     /// Split many texts on up to [`std::thread::available_parallelism`]
@@ -131,7 +206,8 @@ impl Chunker {
     /// threads. If the batch holds large documents and the process already
     /// keeps every core busy, set `TIKTOKEN_THREADS=1` or call
     /// [`tiktoken::set_parallelism`] to keep tiktoken on the calling thread.
-    pub fn split_batch<S: AsRef<str> + Sync>(&self, texts: &[S]) -> Vec<Vec<Chunk>> {
+    #[must_use]
+    pub fn split_batch<'a, S: AsRef<str> + Sync>(&self, texts: &'a [S]) -> Vec<Vec<Chunk<'a>>> {
         let threads = std::thread::available_parallelism()
             .map_or(1, |n| n.get())
             .min(texts.len());
@@ -156,6 +232,33 @@ impl Chunker {
                 .collect()
         })
     }
+
+    pub(crate) fn split_doc<'a>(&self, doc: &Doc<'a>) -> Vec<Chunk<'a>> {
+        let (max, overlap) = (self.max_tokens, self.overlap);
+        let mut chunks = match self.strategy {
+            Strategy::Recursive => strategy::recursive::split_recursive(doc, max, overlap),
+            Strategy::Markdown => strategy::markdown::split_markdown(doc, max, overlap),
+            Strategy::Code => strategy::code::split_code(doc, max, overlap),
+            Strategy::Html => strategy::html::split_html(doc, max, overlap),
+        };
+        finish(&mut chunks);
+        chunks
+    }
+}
+
+/// Final pass shared by every strategy: drop chunks with nothing in them and
+/// number what is left.
+///
+/// A separator tier can leave a lone `"\n"` stranded between two cuts, and that
+/// chunk would go on to be embedded, stored, and never usefully retrieved. The
+/// chunks therefore need not cover every byte of the text (the markdown
+/// strategy also keeps header lines out of them), but every surviving chunk's
+/// byte range addresses the text exactly.
+pub(crate) fn finish(chunks: &mut Vec<Chunk<'_>>) {
+    chunks.retain(|c| !c.content.trim().is_empty());
+    for (i, chunk) in chunks.iter_mut().enumerate() {
+        chunk.index = i;
+    }
 }
 
 #[cfg(test)]
@@ -163,14 +266,94 @@ mod tests {
     use super::*;
 
     #[test]
-    fn split_matches_the_builder() {
-        let text = "One sentence here. Another one there.\n\nA second paragraph.";
-        for max in [3, 8, 512] {
-            assert_eq!(
-                Chunker::new().max_tokens(max).overlap(1).split(text),
-                crate::chunk(text).max_tokens(max).overlap(1).split()
+    fn short_text_is_one_chunk() {
+        let chunks = Chunker::new().split("hello world");
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].content, "hello world");
+        assert_eq!(
+            (chunks[0].index, chunks[0].start_byte, chunks[0].end_byte),
+            (0, 0, 11)
+        );
+        assert!(chunks[0].token_count > 0);
+        assert!(Chunker::new().split("").is_empty());
+    }
+
+    #[test]
+    fn budgets_hold() {
+        let text = "The quick brown fox. ".repeat(100);
+        for c in Chunker::new().max_tokens(20).split(&text) {
+            assert!(
+                c.token_count <= 20,
+                "chunk {} has {} tokens",
+                c.index,
+                c.token_count
             );
         }
+        let chunks = Chunker::new().max_tokens(0).split("hello");
+        assert!(!chunks.is_empty(), "max_tokens(0) becomes 1");
+        let chunks = Chunker::new().max_tokens(1).split("hello world foo bar");
+        assert!(chunks.len() >= 4 && chunks.iter().all(|c| c.token_count <= 1));
+    }
+
+    #[test]
+    fn indices_are_sequential() {
+        let text = "Word. ".repeat(200);
+        for (i, c) in Chunker::new()
+            .max_tokens(10)
+            .split(&text)
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(c.index, i);
+        }
+    }
+
+    #[test]
+    fn cjk_text_splits_within_budget() {
+        for text in [
+            "这是一段中文文本。它包含多个句子。每个句子都应该被正确分割。更多的内容在这里。还有更多。最后一句话。",
+            "これは日本語のテキストです。複数の文が含まれています。正しく分割されるべきです。",
+        ] {
+            let chunks = Chunker::new().max_tokens(10).split(text);
+            assert!(chunks.len() >= 2);
+            assert!(chunks.iter().all(|c| c.token_count <= 10));
+        }
+    }
+
+    #[test]
+    fn names_resolve_or_fail() {
+        assert!(Chunker::for_model("gpt-4o").is_ok());
+        assert!(Chunker::for_encoding("o200k_base").is_ok());
+        assert!(matches!(
+            Chunker::for_model("nonexistent-model-xyz"),
+            Err(Error::UnknownModel(n)) if n == "nonexistent-model-xyz"
+        ));
+        assert!(matches!(
+            Chunker::for_encoding("o201k"),
+            Err(Error::UnknownEncoding(n)) if n == "o201k"
+        ));
+    }
+
+    /// Needs two distinct vocabularies compiled in.
+    #[test]
+    #[cfg(feature = "vocab-cl100k_base")]
+    fn encodings_differ() {
+        let cl = Chunker::for_encoding("cl100k_base").unwrap().encoder();
+        let o2 = Chunker::for_model("gpt-4o").unwrap().encoder();
+        assert!(
+            ["foo::bar::baz::qux", "αβγδεζηθ", "1234567890"]
+                .iter()
+                .any(|t| cl.count(t) != o2.count(t))
+        );
+    }
+
+    #[test]
+    fn with_tokens_returns_the_document_ids() {
+        let text = "One sentence here. Another one there.\n\nA second paragraph.";
+        let chunker = Chunker::new().max_tokens(4).overlap(1);
+        let (chunks, ids) = chunker.split_with_tokens(text);
+        assert_eq!(chunks, chunker.split(text));
+        assert_eq!(ids, chunker.encoder().encode(text));
     }
 
     #[test]

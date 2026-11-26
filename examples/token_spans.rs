@@ -23,7 +23,7 @@ immutable borrows or one mutable borrow. Borrows must not outlive the owner.
 The cost is a learning curve. The benefit is that data races become compile \
 errors instead of production incidents.";
 
-    let chunks = chunkedrs::chunk(doc).max_tokens(40).split();
+    let chunks = chunkedrs::Chunker::new().max_tokens(40).split(doc);
 
     // this is the tokenization a late-chunking pipeline would feed its encoder
     let encoder = tiktoken::get_encoding("o200k_base").unwrap();

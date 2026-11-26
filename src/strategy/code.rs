@@ -33,7 +33,7 @@ pub(crate) const CODE_TIERS: &[&[&str]] = &[
 ];
 
 /// Split source code at boundary markers, respecting token limits.
-pub(crate) fn split_code(doc: &Doc<'_>, max_tokens: usize, overlap: usize) -> Vec<Chunk> {
+pub(crate) fn split_code<'a>(doc: &Doc<'a>, max_tokens: usize, overlap: usize) -> Vec<Chunk<'a>> {
     plan(
         doc,
         0,
@@ -55,9 +55,14 @@ mod tests {
         tiktoken::get_encoding("o200k_base").unwrap()
     }
 
-    fn split_code(text: &str, max: usize, overlap: usize, enc: &tiktoken::CoreBpe) -> Vec<Chunk> {
+    fn split_code<'a>(
+        text: &'a str,
+        max: usize,
+        overlap: usize,
+        enc: &'static tiktoken::CoreBpe,
+    ) -> Vec<Chunk<'a>> {
         let mut chunks = super::split_code(&Doc::new(text, enc), max, overlap);
-        crate::finish(&mut chunks);
+        crate::chunker::finish(&mut chunks);
         chunks
     }
 

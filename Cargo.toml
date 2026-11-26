@@ -5,30 +5,25 @@ edition = "2024"
 description = "Split text into chunks that fit a token budget, for embedding and retrieval: recursive, markdown, code, HTML and semantic strategies, exact byte ranges and document token spans"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/goliajp/rust-chunker"
-authors = ["GOLIA株式会社", "Li Hao <lihao@golia.jp>"]
+authors = ["GOLIA K.K.", "DoraCawl <doracawl@golia.jp>"]
 documentation = "https://docs.rs/chunkedrs"
 keywords = ["chunking", "rag", "text-splitter", "tiktoken", "embeddings"]
 categories = ["text-processing", "algorithms"]
 readme = "README.md"
 
 [dependencies]
-# 3.6.0 fixed a pre-tokenizer bug that split canonical newline runs, and `"\n\n"`
-# is this crate's top-priority separator; 3.8.0 fixed the o200k punctuation
-# rule's missing `/` tail (tests/tokenizer_contract.rs pins both). 4.0.0 moved
-# the vocabularies behind features, which the `vocab-*` passthrough below
-# forwards. 5.x maps Llama 4, Qwen 3.5 and Mistral Large 4 to their own
-# vocabularies and encodes texts of 32 KiB and more on several threads.
+# 5.6 is the first release with `CoreBpe::next_cut` / `prev_cut`, which let a
+# chunk be counted from the document's own ids plus two short encodes.
 #
-# `vocab-o200k_base` is not optional here: it is the encoder every unrecognised
-# model name falls back to, so `resolve_encoder` can never fail to find one.
-# Everything beyond it is the caller's choice.
-tiktoken = { version = "5.5", default-features = false, features = [
+# `vocab-o200k_base` is not optional here: it is the encoding `Chunker::new`
+# uses. Everything beyond it is the caller's choice.
+tiktoken = { version = "5.6", default-features = false, features = [
     "vocab-o200k_base",
 ] }
-# embedrs 0.6 depends on tiktoken 4 behind its `cost-tracking` feature, so a
-# build that enables `semantic` alongside embedrs `cost-tracking` resolves
-# tiktoken 4 and 5 side by side; `semantic` alone does not.
-embedrs = { version = "0.6", optional = true }
+# Only for `Chunker::split_semantic`, which takes any `embedrs::Embed`. With
+# its default features off embedrs has no dependencies; the caller's own
+# embedrs features (transport, local models) unify with this one.
+embedrs = { version = "0.7", default-features = false, optional = true }
 
 [features]
 # Vocabularies are opt-out, mirroring tiktoken. The default is every one of
@@ -36,8 +31,8 @@ embedrs = { version = "0.6", optional = true }
 # ~5 MB of vocabulary data you may not need out of your binary, leaving
 # o200k_base (GPT-4o / GPT-5 / o-series), which is also the fallback encoder.
 #
-#   chunkedrs = { version = "2", default-features = false }
-#   chunkedrs = { version = "2", default-features = false, features = ["vocab-zhipu"] }
+#   chunkedrs = { version = "3", default-features = false }
+#   chunkedrs = { version = "3", default-features = false, features = ["vocab-zhipu"] }
 default = ["vocabs-all"]
 semantic = ["dep:embedrs"]
 
@@ -72,6 +67,8 @@ vocab-minimax_m2 = ["tiktoken/vocab-minimax_m2"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# the semantic tests run a real model on the CPU, no API key
+embedrs = { version = "0.7", features = ["local"] }
 
 [workspace]
 members = [".", "bench-compare"]

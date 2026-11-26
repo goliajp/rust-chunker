@@ -21,7 +21,7 @@ at compile time, making it possible to write concurrent code that is both safe a
 The standard library provides channels, mutexes, and atomic types for synchronization.";
 
     // split with a small token limit to demonstrate multiple chunks
-    let chunks = chunkedrs::chunk(text).max_tokens(50).split();
+    let chunks = chunkedrs::Chunker::new().max_tokens(50).split(text);
 
     println!(
         "input: {} bytes, split into {} chunks\n",
@@ -36,7 +36,7 @@ The standard library provides channels, mutexes, and atomic types for synchroniz
             chunk.token_count,
             chunk.start_byte,
             chunk.end_byte,
-            chunk.len(),
+            chunk.content.len(),
         );
         // show a preview of the content (first 80 chars)
         let preview: String = chunk.content.chars().take(80).collect();

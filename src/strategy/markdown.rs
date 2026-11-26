@@ -1,7 +1,6 @@
 use crate::Chunk;
-use crate::byte_offset_of;
 use crate::plan::{Doc, plan, tiers};
-use crate::recursive::TEXT_TIERS;
+use crate::strategy::recursive::TEXT_TIERS;
 
 /// split markdown text by headers first, then apply recursive splitting within each section.
 ///
@@ -13,7 +12,11 @@ use crate::recursive::TEXT_TIERS;
 ///
 /// note: header lines are stored in metadata only, not in chunk `content`.
 /// joining all chunk contents will not reproduce header lines from the original document.
-pub(crate) fn split_markdown(doc: &Doc<'_>, max_tokens: usize, overlap: usize) -> Vec<Chunk> {
+pub(crate) fn split_markdown<'a>(
+    doc: &Doc<'a>,
+    max_tokens: usize,
+    overlap: usize,
+) -> Vec<Chunk<'a>> {
     let ladder = tiers(TEXT_TIERS);
     let mut chunks = Vec::new();
     for section in extract_sections(doc.text) {
@@ -43,7 +46,7 @@ const MAX_BLOCK_INDENT: usize = 3;
 struct Section<'a> {
     /// Headers from outermost to innermost, e.g.
     /// `["# Guide", "## Installation"]`. Empty before the first header.
-    path: Vec<String>,
+    path: Vec<&'a str>,
     /// The body between this section's header and the next, a slice of the
     /// document.
     content: &'a str,
@@ -59,7 +62,7 @@ fn extract_sections(text: &str) -> Vec<Section<'_>> {
     // (level, header) from outermost inwards — a header of level L pops every
     // entry at level >= L, so `## Usage` after `### From source` correctly
     // drops back to sitting under `# Guide`.
-    let mut stack: Vec<(usize, String)> = Vec::new();
+    let mut stack: Vec<(usize, &str)> = Vec::new();
     // byte range of the body collected since the last header
     let mut current: Option<(usize, usize)> = None;
     let mut fence: Option<Fence> = None;
@@ -98,16 +101,16 @@ fn extract_sections(text: &str) -> Vec<Section<'_>> {
         // ordinary `key: value` line and would otherwise read as a setext rule.
         let in_front_matter = i < front_matter_end;
 
-        let mut header: Option<(usize, String)> = None;
+        let mut header: Option<(usize, &str)> = None;
 
         if !in_front_matter && indented_enough {
             if let Some(level) = atx_level(body) {
-                header = Some((level, body.trim_end().to_string()));
+                header = Some((level, body.trim_end()));
             } else if !body.trim().is_empty()
                 && let Some(level) = lines.get(i + 1).and_then(|next| setext_level(next))
             {
                 // `Title` followed by `====` (level 1) or `----` (level 2)
-                header = Some((level, body.trim_end().to_string()));
+                header = Some((level, body.trim_end()));
                 skip_next = true;
             }
         }
@@ -117,7 +120,7 @@ fn extract_sections(text: &str) -> Vec<Section<'_>> {
                 // flush previous section
                 if let Some((start, end)) = current.take() {
                     sections.push(Section {
-                        path: stack.iter().map(|(_, h)| h.clone()).collect(),
+                        path: stack.iter().map(|&(_, h)| h).collect(),
                         content: &text[start..end],
                         byte_offset: start,
                     });
@@ -132,7 +135,7 @@ fn extract_sections(text: &str) -> Vec<Section<'_>> {
     // flush last section
     if let Some((start, end)) = current {
         sections.push(Section {
-            path: stack.iter().map(|(_, h)| h.clone()).collect(),
+            path: stack.iter().map(|&(_, h)| h).collect(),
             content: &text[start..end],
             byte_offset: start,
         });
@@ -142,7 +145,8 @@ fn extract_sections(text: &str) -> Vec<Section<'_>> {
 }
 
 fn push_content(line: &str, text: &str, current: &mut Option<(usize, usize)>) {
-    let at = byte_offset_of(line, text);
+    // `line` is a slice of `text`
+    let at = line.as_ptr() as usize - text.as_ptr() as usize;
     let start = current.map_or(at, |(start, _)| start);
     *current = Some((start, at + line.len()));
 }
@@ -222,14 +226,14 @@ mod tests {
         tiktoken::get_encoding("o200k_base").unwrap()
     }
 
-    fn split_markdown(
-        text: &str,
+    fn split_markdown<'a>(
+        text: &'a str,
         max: usize,
         overlap: usize,
-        enc: &tiktoken::CoreBpe,
-    ) -> Vec<Chunk> {
+        enc: &'static tiktoken::CoreBpe,
+    ) -> Vec<Chunk<'a>> {
         let mut chunks = super::split_markdown(&Doc::new(text, enc), max, overlap);
-        crate::finish(&mut chunks);
+        crate::chunker::finish(&mut chunks);
         chunks
     }
 
@@ -330,7 +334,7 @@ mod tests {
         let text = "# Title\ntext\n```\n# fake\n```\nmore\n";
         let sections = extract_sections(text);
         assert_eq!(sections.len(), 1);
-        assert_eq!(sections[0].path.last().map(String::as_str), Some("# Title"));
+        assert_eq!(sections[0].path.last().copied(), Some("# Title"));
         assert!(
             sections[0].content.contains("# fake"),
             "content is preserved"
@@ -342,7 +346,7 @@ mod tests {
         let text = "Title\n=====\nbody\n";
         let sections = extract_sections(text);
         assert_eq!(sections.len(), 1);
-        assert_eq!(sections[0].path.last().map(String::as_str), Some("Title"));
+        assert_eq!(sections[0].path.last().copied(), Some("Title"));
         assert_eq!(sections[0].content, "body\n");
     }
 
@@ -351,16 +355,10 @@ mod tests {
         let text = "# Title\nSome intro.\n## Section A\nContent A.\n## Section B\nContent B.\n";
         let sections = extract_sections(text);
         assert_eq!(sections.len(), 3);
-        assert_eq!(sections[0].path.last().map(String::as_str), Some("# Title"));
+        assert_eq!(sections[0].path.last().copied(), Some("# Title"));
         assert!(sections[0].content.contains("Some intro."));
-        assert_eq!(
-            sections[1].path.last().map(String::as_str),
-            Some("## Section A")
-        );
-        assert_eq!(
-            sections[2].path.last().map(String::as_str),
-            Some("## Section B")
-        );
+        assert_eq!(sections[1].path.last().copied(), Some("## Section A"));
+        assert_eq!(sections[2].path.last().copied(), Some("## Section B"));
     }
 
     #[test]

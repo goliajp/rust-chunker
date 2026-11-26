@@ -46,7 +46,11 @@ const TRAILING_ABSORB: &[char] = &[
 
 /// Split the whole document on [`TEXT_TIERS`]: paragraph, line, sentence,
 /// clause, word, and token boundaries as the last resort.
-pub(crate) fn split_recursive(doc: &Doc<'_>, max_tokens: usize, overlap: usize) -> Vec<Chunk> {
+pub(crate) fn split_recursive<'a>(
+    doc: &Doc<'a>,
+    max_tokens: usize,
+    overlap: usize,
+) -> Vec<Chunk<'a>> {
     plan(
         doc,
         0,
@@ -66,7 +70,6 @@ pub(crate) fn split_recursive(doc: &Doc<'_>, max_tokens: usize, overlap: usize) 
 /// The earliest match wins; ties go to the longest separator so `"\r\n"` is not
 /// shadowed by `"\n"`. Any run of [`TRAILING_ABSORB`] following the match is
 /// pulled back into the same piece.
-#[cfg(any(test, feature = "semantic"))]
 pub(crate) fn split_at_any<'a>(text: &'a str, seps: &[&str]) -> Vec<&'a str> {
     let bytes = text.as_bytes();
     // one forward pass: only bytes that can start a separator are tried
@@ -142,16 +145,16 @@ mod tests {
         tiktoken::get_encoding("o200k_base").unwrap()
     }
 
-    fn split_recursive(
-        text: &str,
+    fn split_recursive<'a>(
+        text: &'a str,
         _offset: usize,
         max: usize,
         overlap: usize,
-        enc: &tiktoken::CoreBpe,
+        enc: &'static tiktoken::CoreBpe,
         _path: &[String],
-    ) -> Vec<Chunk> {
+    ) -> Vec<Chunk<'a>> {
         let mut chunks = super::split_recursive(&Doc::new(text, enc), max, overlap);
-        crate::finish(&mut chunks);
+        crate::chunker::finish(&mut chunks);
         chunks
     }
 
@@ -243,7 +246,7 @@ mod tests {
                 x ^= x << 17;
                 text.push_str(alphabet[(x % alphabet.len() as u64) as usize]);
             }
-            for tier in TEXT_TIERS.iter().chain(crate::code::CODE_TIERS) {
+            for tier in TEXT_TIERS.iter().chain(crate::strategy::code::CODE_TIERS) {
                 assert_eq!(
                     split_at_any(&text, tier),
                     split_at_any_reference(&text, tier),
@@ -504,7 +507,7 @@ mod tests {
         for text in &texts {
             let chunks = split_recursive(text, 0, 7, 0, enc, &[]);
             for chunk in &chunks {
-                let actual = enc.count(&chunk.content);
+                let actual = enc.count(chunk.content);
                 assert!(
                     actual <= 7,
                     "chunk {} has {} actual tokens, content: '{}'",

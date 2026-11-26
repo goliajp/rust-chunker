@@ -1,7 +1,7 @@
 //! Separator cuts, found by one forward pass per tier over the planned range
 //! and only as far as the planner has asked for.
 
-use crate::recursive::absorb_trailing;
+use crate::strategy::recursive::absorb_trailing;
 
 /// Separators grouped by their first byte, longest first in each group, so
 /// the first that matches is the longest.
@@ -187,8 +187,8 @@ fn extend(m: &Matcher, text: &str, mut pos: usize, until: usize, cuts: &mut Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::code::CODE_TIERS;
-    use crate::recursive::{TEXT_TIERS, split_at_any};
+    use crate::strategy::code::CODE_TIERS;
+    use crate::strategy::recursive::{TEXT_TIERS, split_at_any};
 
     /// Piece ends of the plain splitter on `text[lo..]`, minus the end.
     fn reference(text: &str, lo: usize, seps: &[&str]) -> Vec<usize> {
