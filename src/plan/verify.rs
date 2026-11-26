@@ -47,8 +47,11 @@ mod tests {
             include_str!("../../bench-compare/data/ja_neko.txt"),
             include_str!("../../bench-compare/data/code_rust.txt"),
         ];
-        for name in ["o200k_base", "cl100k_base"] {
-            let enc = tiktoken::get_encoding(name).unwrap();
+        // cl100k_base only where this build has it
+        for (name, enc) in ["o200k_base", "cl100k_base"]
+            .into_iter()
+            .filter_map(|n| tiktoken::get_encoding(n).map(|e| (n, e)))
+        {
             for text in texts {
                 let text = &text[..text.floor_char_boundary(60_000)];
                 let doc = Doc::new(text, enc);
