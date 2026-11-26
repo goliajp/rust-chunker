@@ -11,7 +11,7 @@
 
 chunkedrs は、長い文書をトークン数の上限に収まるチャンクに分割するライブラリです。埋め込みと検索での利用を想定しています。トークン数は [tiktoken](https://crates.io/crates/tiktoken) で数え、20 種類のエンコーディング（OpenAI、Llama、DeepSeek、Qwen、Mistral、Kimi、GLM、MiniMax）に対応します。各チャンクは元の文書のスライスで、文書でのバイト範囲と、文書全体のトークン列での範囲を持ちます。依存は tiktoken だけです。`semantic` feature を有効にすると [embedrs](https://crates.io/crates/embedrs) が加わりますが、embedrs 自体も依存を持ちません。
 
-<<HEADLINE>>
+Apple M4 Pro のシングルスレッド、`o200k_base`、1 チャンク 512 トークンの条件で、200 KB の英語の本を 0.23 ms で分割します。本全体を 1 回 `encode` する時間の 1.9 倍です。chunkedrs 2.2 では 0.37 ms でした。text-splitter 0.33.6 は、同じトークナイザーで 1.20 ms、tiktoken-rs 0.12（`tiktoken-rs` feature が使うトークナイザー）で 35.2 ms かかります。
 
 ## 特徴
 
@@ -55,7 +55,36 @@ let kept: Vec<chunkedrs::OwnedChunk> = chunks.iter().map(|c| c.to_owned_chunk())
 
 ## 性能
 
-<<PERF>>
+数値は文書 1 つの分割にかかるミリ秒で、ウォームアップ後 9 ラウンドの中央値です。Apple M4 Pro の Mac mini、rustc 1.100、LTO を有効にした release ビルド、`TIKTOKEN_THREADS=1`、`o200k_base`、オーバーラップなし、測定日は 2026-11-27 です。測定中はほかの処理も動いていた（ロードアベレージ 2.7〜5.4）ため、各行の列は続けて測っています。chunkedrs 2.2.0 は 1 つ前のリリースで、同じ tiktoken 5.6 を使っています。text-splitter には容量として同じ `max_tokens` を渡し、ほかは既定値です。コード分割には tree-sitter-rust 0.24 を使っています。
+
+| コーパス | 方式 | max_tokens | `encode` 1 回 | chunkedrs 3 | chunkedrs 2.2.0 | text-splitter + tiktoken 5.6 | text-splitter + tiktoken-rs 0.12 |
+|---|---|--:|--:|--:|--:|--:|--:|
+| book_en.txt | recursive | 512 | 0.119 | **0.227** | 0.373 | 1.198 | 35.15 |
+| book_en.txt | recursive | 128 | 0.117 | **0.292** | 0.439 | 2.513 | 65.12 |
+| zh_xiyouji.md | recursive | 512 | 0.191 | **0.278** | 0.445 | 0.476 | 20.13 |
+| zh_xiyouji.md | markdown | 512 | 0.191 | **0.295** | 0.448 | 1.018 | 40.30 |
+| zh_xiyouji.md | recursive | 128 | 0.162 | **0.393** | 0.588 | 1.442 | 30.47 |
+| zh_xiyouji.md | markdown | 128 | 0.162 | **0.434** | 0.597 | 2.014 | 44.21 |
+| ja_neko.txt | recursive | 512 | 0.086 | **0.196** | 0.273 | 0.769 | 46.48 |
+| ja_neko.txt | recursive | 128 | 0.081 | **0.327** | 0.384 | 2.014 | 65.62 |
+| md_rust_book.md | recursive | 512 | 0.102 | **0.210** | 0.325 | 0.748 | 22.45 |
+| md_rust_book.md | markdown | 512 | 0.102 | **0.268** | 0.406 | 1.193 | 25.63 |
+| md_rust_book.md | recursive | 128 | 0.101 | **0.256** | 0.375 | 0.915 | 21.95 |
+| md_rust_book.md | markdown | 128 | 0.101 | **0.333** | 0.519 | 1.734 | 33.52 |
+| code_rust.txt | recursive | 512 | 0.060 | **0.136** | 0.204 | 0.326 | 11.94 |
+| code_rust.txt | code | 512 | 0.060 | **0.148** | 0.211 | 6.660 | 34.44 |
+| code_rust.txt | recursive | 128 | 0.060 | **0.186** | 0.257 | 0.505 | 15.36 |
+| code_rust.txt | code | 128 | 0.060 | **0.227** | 0.303 | 7.770 | 61.87 |
+
+`book_en.txt` は『高慢と偏見』の 200,000 バイト、`zh_xiyouji.md` は Wikisource の『西遊記』第 1〜9 回を Markdown にした 178,622 バイト、`ja_neko.txt` は青空文庫の夏目漱石『吾輩は猫である』の先頭 180,000 バイト（ルビを除去）、`md_rust_book.md` は『The Rust Programming Language』第 3〜6 章の 174,237 バイト、`code_rust.txt` は 100,000 バイトの Rust のソースコードです。いずれも [`bench-compare/data`](bench-compare/data) にあります。
+
+- 上の表のすべてのチャンクを tiktoken で数え直しました。chunkedrs にも text-splitter にも上限を超えるチャンクはありません
+- chunkedrs の時間は、文書全体を 1 回 `encode` する時間の 1.5〜2.3 倍（512 トークン）、128 トークンでは最大 4.0 倍です。文書を 1 回エンコードし、各トークンのバイト長を調べます。各チャンクのトークン数は、チャンク内で最初と最後の tiktoken のカット位置の間は文書の ID を再利用し、両端だけをエンコードし直して数えます。残りが境界探しとチャンクの組み立てです
+- 2.2.0 との比較：すべての行で 15〜39% 短く、分割結果は同じです
+- `cl100k_base` でもほぼ同じです（0.13〜0.53 ms、2.2.0 より 14〜36% 短い）。tiktoken の既定のマルチスレッドを使うと、これらの文書の全体のエンコードが複数のスレッドで行われ、chunkedrs は 0.11〜0.29 ms になります
+- `Chunker::split_batch` で 80 文書（5 つのコーパスを各 16 回、合計 13.3 MB）を処理すると、1 つずつでは 21.1 ms、一括では 2.9 ms です
+
+再現するには `TIKTOKEN_THREADS=1 cargo run --release -p bench-compare` を実行してください。
 
 ## 分割の仕組み
 
@@ -176,7 +205,7 @@ chunkedrs = { version = "3", default-features = false }           # o200k_base �
 chunkedrs = { version = "3", default-features = false, features = ["vocab-qwen"] }
 ```
 
-<<SIZES>>
+実行時に名前でエンコーディングを選ぶプログラムを macOS arm64 で release ビルドすると、すべての語彙を含む場合は 9,055,648 バイト、`default-features = false` の場合は 1,938,480 バイトで、79% 小さくなります。
 
 ベンダー単位：`vocab-openai`、`vocab-meta`、`vocab-deepseek`、`vocab-qwen`、`vocab-mistral`、`vocab-moonshot`、`vocab-zhipu`、`vocab-minimax`。語彙単位：`vocab-cl100k_base`、`vocab-llama4`、`vocab-qwen3_5`、`vocab-mistral_v15`、`vocab-glm5` のほか、tiktoken の一覧にあるもの。
 

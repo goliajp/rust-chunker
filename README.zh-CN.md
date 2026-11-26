@@ -11,7 +11,7 @@
 
 chunkedrs 把长文档切成不超过 token 上限的分块，用于向量化和检索。token 数由 [tiktoken](https://crates.io/crates/tiktoken) 计算，支持 20 种编码（OpenAI、Llama、DeepSeek、Qwen、Mistral、Kimi、GLM、MiniMax）。每个分块都是原文的一个切片，带着它在原文中的字节范围，以及它在整篇文档 token 序列中的位置。除 tiktoken 外没有其他依赖；开启 `semantic` feature 时会加上 [embedrs](https://crates.io/crates/embedrs)，它本身也没有依赖。
 
-<<HEADLINE>>
+在 Apple M4 Pro 上单线程运行，编码 `o200k_base`，每块 512 token：切分一本 200 KB 的英文书用 0.23 ms，是对整本书做一次 `encode` 的 1.9 倍。chunkedrs 2.2 需要 0.37 ms；text-splitter 0.33.6 用同一个分词器需要 1.20 ms，用 tiktoken-rs 0.12（它的 `tiktoken-rs` feature 所用的分词器）需要 35.2 ms。
 
 ## 特点
 
@@ -55,7 +55,36 @@ let kept: Vec<chunkedrs::OwnedChunk> = chunks.iter().map(|c| c.to_owned_chunk())
 
 ## 性能
 
-<<PERF>>
+表中是切分一篇文档所用的毫秒数，取预热后 9 轮的中位数。测试环境：Apple M4 Pro 的 Mac mini，rustc 1.100，开启 LTO 的 release 构建，`TIKTOKEN_THREADS=1`，`o200k_base`，不重叠，2026-11-27。测试时机器上还有其他任务（期间平均负载 2.7 到 5.4），所以同一行的各列是紧接着依次测的。chunkedrs 2.2.0 是上一个版本，用的是同一个 tiktoken 5.6。text-splitter 的容量设为同样的 `max_tokens`，其余用默认值；它的代码切分用 tree-sitter-rust 0.24。
+
+| 语料 | 策略 | max_tokens | 一次 `encode` | chunkedrs 3 | chunkedrs 2.2.0 | text-splitter + tiktoken 5.6 | text-splitter + tiktoken-rs 0.12 |
+|---|---|--:|--:|--:|--:|--:|--:|
+| book_en.txt | recursive | 512 | 0.119 | **0.227** | 0.373 | 1.198 | 35.15 |
+| book_en.txt | recursive | 128 | 0.117 | **0.292** | 0.439 | 2.513 | 65.12 |
+| zh_xiyouji.md | recursive | 512 | 0.191 | **0.278** | 0.445 | 0.476 | 20.13 |
+| zh_xiyouji.md | markdown | 512 | 0.191 | **0.295** | 0.448 | 1.018 | 40.30 |
+| zh_xiyouji.md | recursive | 128 | 0.162 | **0.393** | 0.588 | 1.442 | 30.47 |
+| zh_xiyouji.md | markdown | 128 | 0.162 | **0.434** | 0.597 | 2.014 | 44.21 |
+| ja_neko.txt | recursive | 512 | 0.086 | **0.196** | 0.273 | 0.769 | 46.48 |
+| ja_neko.txt | recursive | 128 | 0.081 | **0.327** | 0.384 | 2.014 | 65.62 |
+| md_rust_book.md | recursive | 512 | 0.102 | **0.210** | 0.325 | 0.748 | 22.45 |
+| md_rust_book.md | markdown | 512 | 0.102 | **0.268** | 0.406 | 1.193 | 25.63 |
+| md_rust_book.md | recursive | 128 | 0.101 | **0.256** | 0.375 | 0.915 | 21.95 |
+| md_rust_book.md | markdown | 128 | 0.101 | **0.333** | 0.519 | 1.734 | 33.52 |
+| code_rust.txt | recursive | 512 | 0.060 | **0.136** | 0.204 | 0.326 | 11.94 |
+| code_rust.txt | code | 512 | 0.060 | **0.148** | 0.211 | 6.660 | 34.44 |
+| code_rust.txt | recursive | 128 | 0.060 | **0.186** | 0.257 | 0.505 | 15.36 |
+| code_rust.txt | code | 128 | 0.060 | **0.227** | 0.303 | 7.770 | 61.87 |
+
+`book_en.txt` 是《傲慢与偏见》的 200,000 字节；`zh_xiyouji.md` 是 Wikisource 上《西游记》第 1 到 9 回，整理成 Markdown，共 178,622 字节；`ja_neko.txt` 是青空文库中夏目漱石《我是猫》的前 180,000 字节，去掉了注音；`md_rust_book.md` 是《The Rust Programming Language》第 3 到 6 章，共 174,237 字节；`code_rust.txt` 是 100,000 字节的 Rust 源码。这些文件都在 [`bench-compare/data`](bench-compare/data) 里。
+
+- 上表每一行的每个分块都用 tiktoken 重新数过，chunkedrs 和 text-splitter 都没有超出上限的分块
+- 每块 512 token 时，chunkedrs 用时是对整篇文档做一次 `encode` 的 1.5 到 2.3 倍，每块 128 token 时最多 4.0 倍。它把文档编码一次，查出每个 token 的字节长度；数每个分块的 token 时，在分块中第一个和最后一个 tiktoken 切点之间直接用文档的 id，只重新编码两端；其余时间用于找边界和生成分块
+- 和 2.2.0 相比：每一行都少用 15% 到 39% 的时间，切出的分块相同
+- 换成 `cl100k_base` 结果相近（0.13 到 0.53 ms，比 2.2.0 少用 14% 到 36%）。使用 tiktoken 默认的多线程时，这些文档的整篇编码会分到多个线程上，chunkedrs 用时 0.11 到 0.29 ms
+- 用 `Chunker::split_batch` 处理 80 篇文档（5 份语料各 16 次，共 13.3 MB）：逐篇处理 21.1 ms，批量处理 2.9 ms
+
+复现方法：`TIKTOKEN_THREADS=1 cargo run --release -p bench-compare`。
 
 ## 切分方式
 
@@ -69,7 +98,7 @@ let kept: Vec<chunkedrs::OwnedChunk> = chunks.iter().map(|c| c.to_owned_chunk())
 | `html()` | 块级元素的结束标签之后（`</p>`、`</li>`、`</section>`、`</h1>` 等），再用递归策略的边界 |
 | `semantic()` | 相邻句子的向量不再相似的地方，再用递归策略的边界 |
 
-范围内一个边界都没有时，分块在 token 边界结束，并退到字符边界上。选出的文本随后按单独编码的情况重新计数：BPE 会跨过切点合并，所以单独编码一段文本，得到的 token 数可能比它在整篇文档中所占的多一个或少一个。这次计数复用整篇文档的 token id：在分块中第一个和最后一个"tiktoken 保证切开后 token 不变"的位置之间，直接用文档的 id，只把两端的几个字节重新编码。极少数情况下分块超出上限，就缩小范围重新选。
+范围内一个边界都没有时，分块在 token 边界结束，并退到字符边界上。选出的文本随后按单独编码的情况重新计数：BPE 会跨过切点合并，所以单独编码一段文本，得到的 token 数可能比它在整篇文档中所占的多一个或少一个。这次计数复用整篇文档的 token id：在分块中第一个和最后一个「tiktoken 保证切开后 token 不变」的位置之间，直接用文档的 id，只把两端的几个字节重新编码。极少数情况下分块超出上限，就缩小范围重新选。
 
 代码和 HTML 策略只看标点和标签，不做语法分析，也不增加依赖；字符串字面量里的 `}` 也会被当成代码块的结尾。需要按语法切分代码时，请用 text-splitter 基于 tree-sitter 的 `CodeSplitter`。
 
@@ -176,7 +205,7 @@ chunkedrs = { version = "3", default-features = false }           # 只有 o200k
 chunkedrs = { version = "3", default-features = false, features = ["vocab-qwen"] }
 ```
 
-<<SIZES>>
+一个在运行时按名字选择编码的程序，在 macOS arm64 上做 release 构建：包含全部词表时为 9,055,648 字节，`default-features = false` 时为 1,938,480 字节，小 79%。
 
 按厂商分组：`vocab-openai`、`vocab-meta`、`vocab-deepseek`、`vocab-qwen`、`vocab-mistral`、`vocab-moonshot`、`vocab-zhipu`、`vocab-minimax`。单个词表：`vocab-cl100k_base`、`vocab-llama4`、`vocab-qwen3_5`、`vocab-mistral_v15`、`vocab-glm5`，以及 tiktoken 列出的其他词表。
 

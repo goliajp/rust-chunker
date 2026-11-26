@@ -58,8 +58,11 @@ overlap (a test compares the two on every strategy, five encodings and
 - Faster: each chunk's count reuses the document's token ids between the
   first and the last position where tiktoken 5.6 can cut the chunk
   (`CoreBpe::next_cut`, `prev_cut`) and encodes only the two ends again.
-  The counts are the same as encoding the whole chunk. Numbers in the
-  README.
+  The counts are the same as encoding the whole chunk. On an Apple M4 Pro,
+  one thread, `o200k_base`: 15 to 39% less time than 2.2 on every row of
+  the README table, a 200 KB English book at 512 tokens 0.37 ms to 0.23 ms,
+  180 KB of Japanese 0.27 ms to 0.20 ms. Separator matchers are built once
+  per split instead of once per markdown section.
 - Requires tiktoken 5.6. The `semantic` feature depends on embedrs 0.7
   with its default features off, which has no dependencies.
 - Semantic splitting breaks at the 95th percentile of the document's

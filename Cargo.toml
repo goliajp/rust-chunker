@@ -29,7 +29,7 @@ embedrs = { version = "0.7", default-features = false, optional = true }
 # Vocabularies are opt-out, mirroring tiktoken. The default is every one of
 # them, which is what a 1.x build shipped; `default-features = false` keeps
 # ~5 MB of vocabulary data you may not need out of your binary, leaving
-# o200k_base (GPT-4o / GPT-5 / o-series), which is also the fallback encoder.
+# o200k_base (GPT-4o / GPT-5 / o-series), the encoding `Chunker::new` uses.
 #
 #   chunkedrs = { version = "3", default-features = false }
 #   chunkedrs = { version = "3", default-features = false, features = ["vocab-zhipu"] }
