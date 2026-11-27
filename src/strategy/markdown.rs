@@ -55,8 +55,7 @@ struct Section<'a> {
 
 /// extract markdown sections with their header ancestry
 fn extract_sections(text: &str) -> Vec<Section<'_>> {
-    let lines: Vec<&str> = text.split_inclusive('\n').collect();
-    let front_matter_end = front_matter_end(&lines);
+    let front_matter_end = front_matter_end(text);
 
     let mut sections: Vec<Section> = Vec::new();
     // (level, header) from outermost inwards — a header of level L pops every
@@ -66,15 +65,9 @@ fn extract_sections(text: &str) -> Vec<Section<'_>> {
     // byte range of the body collected since the last header
     let mut current: Option<(usize, usize)> = None;
     let mut fence: Option<Fence> = None;
-    let mut skip_next = false;
+    let mut lines = text.split_inclusive('\n').peekable();
 
-    for (i, line) in lines.iter().enumerate() {
-        // the underline of a setext header, already consumed with its title
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-
+    while let Some(line) = lines.next() {
         let body = line.trim_start();
         let indent = line.len() - body.len();
         let indented_enough = indent <= MAX_BLOCK_INDENT;
@@ -99,7 +92,7 @@ fn extract_sections(text: &str) -> Vec<Section<'_>> {
         // --- headers -------------------------------------------------------
         // Front matter is metadata, not prose: its closing `---` follows an
         // ordinary `key: value` line and would otherwise read as a setext rule.
-        let in_front_matter = i < front_matter_end;
+        let in_front_matter = offset(line, text) < front_matter_end;
 
         let mut header: Option<(usize, &str)> = None;
 
@@ -107,11 +100,12 @@ fn extract_sections(text: &str) -> Vec<Section<'_>> {
             if let Some(level) = atx_level(body) {
                 header = Some((level, body.trim_end()));
             } else if !body.trim().is_empty()
-                && let Some(level) = lines.get(i + 1).and_then(|next| setext_level(next))
+                && let Some(level) = lines.peek().and_then(|next| setext_level(next))
             {
-                // `Title` followed by `====` (level 1) or `----` (level 2)
+                // `Title` followed by `====` (level 1) or `----` (level 2);
+                // the underline is part of the header
                 header = Some((level, body.trim_end()));
-                skip_next = true;
+                lines.next();
             }
         }
 
@@ -144,9 +138,13 @@ fn extract_sections(text: &str) -> Vec<Section<'_>> {
     sections
 }
 
+/// Byte offset of `line`, a slice of `text`, in `text`.
+fn offset(line: &str, text: &str) -> usize {
+    line.as_ptr() as usize - text.as_ptr() as usize
+}
+
 fn push_content(line: &str, text: &str, current: &mut Option<(usize, usize)>) {
-    // `line` is a slice of `text`
-    let at = line.as_ptr() as usize - text.as_ptr() as usize;
+    let at = offset(line, text);
     let start = current.map_or(at, |(start, _)| start);
     *current = Some((start, at + line.len()));
 }
@@ -201,10 +199,11 @@ fn closes_fence(body: &str, open: Fence) -> bool {
     len >= open.len && body[len..].trim().is_empty()
 }
 
-/// Index of the first line after YAML (`---`) or TOML (`+++`) front matter.
-/// Returns 0 when the document has none.
-fn front_matter_end(lines: &[&str]) -> usize {
-    let Some(first) = lines.first() else {
+/// Byte offset of the first line after YAML (`---`) or TOML (`+++`) front
+/// matter. Returns 0 when the document has none.
+fn front_matter_end(text: &str) -> usize {
+    let mut lines = text.split_inclusive('\n');
+    let Some(first) = lines.next() else {
         return 0;
     };
     let delim = match first.trim_end() {
@@ -212,10 +211,14 @@ fn front_matter_end(lines: &[&str]) -> usize {
         "+++" => "+++",
         _ => return 0,
     };
-    lines
-        .iter()
-        .position(|l| l.trim_end() == delim && !std::ptr::eq(*l, *first))
-        .map_or(0, |close| close + 1)
+    let mut at = first.len();
+    for line in lines {
+        at += line.len();
+        if line.trim_end() == delim {
+            return at;
+        }
+    }
+    0
 }
 
 #[cfg(test)]
@@ -310,20 +313,15 @@ mod tests {
 
     #[test]
     fn front_matter_end_detects_yaml_and_toml() {
-        let yaml: Vec<&str> = "---\ntitle: x\n---\nbody\n".split_inclusive('\n').collect();
-        assert_eq!(front_matter_end(&yaml), 3);
+        let yaml = "---\ntitle: x\n---\nbody\n";
+        assert_eq!(front_matter_end(yaml), yaml.find("body").unwrap());
 
-        let toml: Vec<&str> = "+++\ntitle = 'x'\n+++\nbody\n"
-            .split_inclusive('\n')
-            .collect();
-        assert_eq!(front_matter_end(&toml), 3);
+        let toml = "+++\ntitle = 'x'\n+++\nbody\n";
+        assert_eq!(front_matter_end(toml), toml.find("body").unwrap());
 
-        let none: Vec<&str> = "# Title\nbody\n".split_inclusive('\n').collect();
-        assert_eq!(front_matter_end(&none), 0);
-
-        let unterminated: Vec<&str> = "---\ntitle: x\n".split_inclusive('\n').collect();
+        assert_eq!(front_matter_end("# Title\nbody\n"), 0);
         assert_eq!(
-            front_matter_end(&unterminated),
+            front_matter_end("---\ntitle: x\n"),
             0,
             "an unterminated block is not front matter"
         );

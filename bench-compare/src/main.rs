@@ -75,6 +75,16 @@ fn contents<'t>(chunks: Vec<chunkedrs::Chunk<'t>>) -> Vec<&'t str> {
     chunks.into_iter().map(|c| c.content).collect()
 }
 
+fn chunked30(enc: &str, max: usize) -> chunkedrs30::Chunker {
+    chunkedrs30::Chunker::for_encoding(enc)
+        .unwrap()
+        .max_tokens(max)
+}
+
+fn contents30<'t>(chunks: Vec<chunkedrs30::Chunk<'t>>) -> Vec<&'t str> {
+    chunks.into_iter().map(|c| c.content).collect()
+}
+
 fn chunked22<'a>(text: &'a str, enc: &'static str, max: usize) -> chunkedrs22::ChunkBuilder<'a> {
     chunkedrs22::chunk(text).encoding(enc).max_tokens(max)
 }
@@ -107,6 +117,10 @@ fn candidates(corpus: &str, enc_name: &'static str, max: usize) -> Vec<(&'static
             Box::new(move |t| contents(chunked(enc_name, max).split(t))),
         ),
         (
+            "chunkedrs 3.0.0",
+            Box::new(move |t| contents30(chunked30(enc_name, max).split(t))),
+        ),
+        (
             "chunkedrs 2.2.0",
             Box::new(move |t| contents22(t, chunked22(t, enc_name, max).split())),
         ),
@@ -125,6 +139,10 @@ fn candidates(corpus: &str, enc_name: &'static str, max: usize) -> Vec<(&'static
             Box::new(move |t| contents(chunked(enc_name, max).markdown().split(t))),
         ));
         out.push((
+            "chunkedrs 3.0.0 markdown",
+            Box::new(move |t| contents30(chunked30(enc_name, max).markdown().split(t))),
+        ));
+        out.push((
             "chunkedrs 2.2.0 markdown",
             Box::new(move |t| contents22(t, chunked22(t, enc_name, max).markdown().split())),
         ));
@@ -141,6 +159,10 @@ fn candidates(corpus: &str, enc_name: &'static str, max: usize) -> Vec<(&'static
         out.push((
             "chunkedrs code",
             Box::new(move |t| contents(chunked(enc_name, max).code().split(t))),
+        ));
+        out.push((
+            "chunkedrs 3.0.0 code",
+            Box::new(move |t| contents30(chunked30(enc_name, max).code().split(t))),
         ));
         out.push((
             "chunkedrs 2.2.0 code",

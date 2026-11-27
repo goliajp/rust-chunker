@@ -5,6 +5,29 @@ All notable changes to this crate will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Faster, with the same chunks. The document's token ends come from
+  tiktoken 5.7's `encode_with_ends_into`, which the encoder fills as it
+  goes, instead of a second pass over the ids that looks up each token's
+  length; markdown sections are found by scanning the text itself instead
+  of a vector of its lines. On an Apple M4 Pro, one thread, `o200k_base`:
+  10 to 20% less time than 3.0.0 on every row of the README table, and the
+  recursive strategy at 512 tokens takes 1.6 to 2.0 times one `encode` of
+  the document (3.0.0: 1.8 to 2.4 times), for example 200 KB of English
+  0.226 ms to 0.189 ms and 180 KB of Japanese 0.184 ms to 0.148 ms.
+- Requires tiktoken 5.7.
+
+### Added
+
+- A test that compares every strategy with 3.0.0: byte ranges, token
+  spans, token counts and section paths on the five `bench-compare`
+  corpora (budgets 8 to 512, with and without overlap) and 2,000 generated
+  documents, for each compiled encoding among `o200k_base`, `cl100k_base`,
+  `qwen3_5`, `llama3` and `glm5`.
+
 ## [3.0.0] - 2026-11-27
 
 ### Upgrading from 2.x

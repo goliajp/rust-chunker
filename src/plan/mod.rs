@@ -29,14 +29,9 @@ pub(crate) struct Doc<'a> {
 
 impl<'a> Doc<'a> {
     pub fn new(text: &'a str, encoder: &'a CoreBpe) -> Self {
-        let tokens = encoder.encode(text);
-        let mut bounds = Vec::with_capacity(tokens.len() + 1);
-        let mut acc = 0usize;
-        bounds.push(0);
-        for &t in &tokens {
-            acc += encoder.token_bytes(t).map_or(0, <[u8]>::len);
-            bounds.push(acc);
-        }
+        let (mut tokens, mut bounds) = (Vec::new(), vec![0]);
+        // the ends of the tokens follow the leading 0: the start of each
+        encoder.encode_with_ends_into(text, &mut tokens, &mut bounds);
         Doc {
             text,
             encoder,
