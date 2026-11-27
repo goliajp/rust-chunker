@@ -46,9 +46,10 @@ impl Matcher {
             return None;
         }
         let rest = &bytes[i..];
+        // a byte loop: separators are a few bytes, too short for a memcmp call
         self.groups[g as usize - 1]
             .iter()
-            .find(|s| rest.starts_with(s))
+            .find(|s| rest.len() >= s.len() && rest.iter().zip(s.iter()).all(|(a, b)| a == b))
             .map(|s| s.len())
     }
 }
@@ -67,6 +68,10 @@ pub(crate) enum Scan<'m> {
         cuts: Vec<usize>,
         /// Bytes before this offset have been scanned.
         pos: usize,
+        /// The document's newlines, and the index of the first one not
+        /// passed yet.
+        newlines: &'m [usize],
+        next: usize,
     },
 }
 
@@ -75,7 +80,7 @@ impl<'m> Scan<'m> {
         Scan::Fixed(cuts.iter().copied().filter(|&c| c > lo && c < hi).collect())
     }
 
-    pub fn seps(matcher: &'m Matcher, lo: usize) -> Self {
+    pub fn seps(matcher: &'m Matcher, lo: usize, newlines: &'m [usize]) -> Self {
         if !matcher.newline {
             return Scan::Back(matcher);
         }
@@ -83,6 +88,8 @@ impl<'m> Scan<'m> {
             matcher,
             cuts: Vec::new(),
             pos: lo,
+            newlines,
+            next: 0,
         }
     }
 
@@ -104,10 +111,21 @@ impl<'m> Scan<'m> {
         let cuts = match self {
             Scan::Back(matcher) => return last_before(matcher, &text[..hi], from, floor, lim),
             Scan::Fixed(cuts) => cuts,
-            Scan::Seps { matcher, cuts, pos } => {
+            Scan::Seps {
+                matcher,
+                cuts,
+                pos,
+                newlines,
+                next,
+            } => {
                 *pos = (*pos).max(from);
                 if *pos < lim {
-                    *pos = extend(matcher, &text[..hi], *pos, lim, cuts);
+                    let mut lines = Lines {
+                        all: newlines,
+                        next: *next,
+                    };
+                    *pos = extend(matcher, &text[..hi], *pos, lim, cuts, &mut lines);
+                    *next = lines.next;
                 }
                 cuts
             }
@@ -139,14 +157,66 @@ fn last_before(m: &Matcher, text: &str, from: usize, floor: usize, lim: usize) -
     None
 }
 
+/// A cursor over the document's newline offsets.
+struct Lines<'a> {
+    all: &'a [usize],
+    next: usize,
+}
+
+impl Lines<'_> {
+    /// The first newline at or after `pos`.
+    #[inline]
+    fn at_or_after(&mut self, pos: usize) -> Option<usize> {
+        // `next` only moves forward, so the steps add up to one pass
+        while self.all.get(self.next).is_some_and(|&p| p < pos) {
+            self.next += 1;
+        }
+        self.all.get(self.next).copied()
+    }
+}
+
+/// Offsets of every `\n` in `text`.
+pub(crate) fn newlines(text: &str) -> Vec<usize> {
+    let mut out = Vec::new();
+    let (blocks, tail) = text.as_bytes().as_chunks::<32>();
+    let mut base = 0;
+    for block in blocks {
+        // the test and the mask are written so that they vectorise
+        let any = block.iter().fold(0u8, |a, &b| a | u8::from(b == b'\n'));
+        if any != 0 {
+            let mut mask = block
+                .iter()
+                .enumerate()
+                .fold(0u32, |m, (j, &b)| m | (u32::from(b == b'\n') << j));
+            while mask != 0 {
+                out.push(base + mask.trailing_zeros() as usize);
+                mask &= mask - 1;
+            }
+        }
+        base += 32;
+    }
+    let tail = tail.iter().enumerate();
+    out.extend(tail.filter(|&(_, &b)| b == b'\n').map(|(j, _)| base + j));
+    out
+}
+
 /// Scan `text` from `pos` until a match starting at or after `until` would be
 /// needed, appending piece ends below `text.len()`; returns the new position.
-fn extend(m: &Matcher, text: &str, mut pos: usize, until: usize, cuts: &mut Vec<usize>) -> usize {
+/// A newline tier steps through `lines`, the newlines of a text that starts
+/// with `text`.
+fn extend(
+    m: &Matcher,
+    text: &str,
+    mut pos: usize,
+    until: usize,
+    cuts: &mut Vec<usize>,
+    lines: &mut Lines<'_>,
+) -> usize {
     let bytes = text.as_bytes();
     let n = bytes.len();
     while pos < until.min(n) {
         let hit = if m.newline {
-            let Some(p) = text[pos..].find('\n').map(|p| p + pos) else {
+            let Some(p) = lines.at_or_after(pos).filter(|&p| p < n) else {
                 return n;
             };
             // a `\r\n` separator starts one byte before its newline
@@ -229,7 +299,8 @@ mod tests {
                 let want = reference(&text, 0, tier);
                 // ask in small steps, as the planner does
                 let matcher = Matcher::new(tier);
-                let mut scan = Scan::seps(&matcher, 0);
+                let nl = newlines(&text);
+                let mut scan = Scan::seps(&matcher, 0, &nl);
                 let mut got = Vec::new();
                 for lim in 1..=text.len() {
                     if let Some(c) = scan.last_in(&text, text.len(), 0, 0, lim)
@@ -244,6 +315,23 @@ mod tests {
     }
 
     #[test]
+    fn newlines_are_every_newline() {
+        let mut x: u64 = 0x2545_f491;
+        for len in 0..300 {
+            let text: String = (0..len)
+                .map(|_| {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    ['a', '\n', '語', ' '][(x % 4) as usize]
+                })
+                .collect();
+            let want: Vec<usize> = text.match_indices('\n').map(|(i, _)| i).collect();
+            assert_eq!(newlines(&text), want, "{text:?}");
+        }
+    }
+
+    #[test]
     fn last_in_respects_the_window() {
         let text = "One. Two! Three? Four. Five";
         let ends = reference(text, 0, TEXT_TIERS[2]);
@@ -251,7 +339,7 @@ mod tests {
             for floor in 0..lim {
                 let want = ends.iter().copied().rfind(|&e| e <= lim && e > floor);
                 let matcher = Matcher::new(TEXT_TIERS[2]);
-                let mut scan = Scan::seps(&matcher, 0);
+                let mut scan = Scan::seps(&matcher, 0, &[]);
                 assert_eq!(scan.last_in(text, text.len(), 0, floor, lim), want);
             }
         }
