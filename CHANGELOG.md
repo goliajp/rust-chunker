@@ -5,6 +5,21 @@ All notable changes to this crate will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Faster, with the same chunks. Each newline separator tier used to search
+  the whole document for `\n` again, and the markdown strategy searched it
+  once more to walk its lines; now the newlines are found once, in one
+  pass, and every tier and the line walk step through that list. On an
+  Apple M6, one thread, median of three runs: 1 to 23% less time than 3.1.0
+  on every row of the README table with `o200k_base`, 2 to 24% with
+  `cl100k_base`, most on code (17 to 24% with the code strategy). At 512
+  tokens every strategy now takes 1.4 to 1.9 times one `encode` of the
+  document with either encoding (3.1.0: up to 2.07 times, on Japanese with
+  `cl100k_base` and on Markdown with the markdown strategy).
+
 ## [3.1.0] - 2026-11-27
 
 ### Changed

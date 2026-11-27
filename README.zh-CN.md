@@ -11,7 +11,7 @@
 
 chunkedrs 把长文档切成不超过 token 上限的分块，用于向量化和检索。token 数由 [tiktoken](https://crates.io/crates/tiktoken) 计算，支持 20 种编码（OpenAI、Llama、DeepSeek、Qwen、Mistral、Kimi、GLM、MiniMax）。每个分块都是原文的一个切片，带着它在原文中的字节范围，以及它在整篇文档 token 序列中的位置。除 tiktoken 外没有其他依赖；开启 `semantic` feature 时会加上 [embedrs](https://crates.io/crates/embedrs)，它本身也没有依赖。
 
-在 Apple M4 Pro 上单线程运行，编码 `o200k_base`，每块 512 token：切分一本 200 KB 的英文书用 0.19 ms，是对整本书做一次 `encode` 的 1.6 倍。chunkedrs 3.0 需要 0.23 ms，2.2 需要 0.35 ms；text-splitter 0.33.6 用同一个分词器需要 1.19 ms，用 tiktoken-rs 0.12（它的 `tiktoken-rs` feature 所用的分词器）需要 34.8 ms。
+在 Apple M6 上单线程运行，编码 `o200k_base`，每块 512 token：切分一本 200 KB 的英文书用 0.13 ms，是对整本书做一次 `encode` 的 1.5 倍。chunkedrs 3.1 需要 0.14 ms，3.0 需要 0.16 ms，2.2 需要 0.25 ms；text-splitter 0.33.6 用同一个分词器需要 0.93 ms，用 tiktoken-rs 0.12（它的 `tiktoken-rs` feature 所用的分词器）需要 24.6 ms。
 
 ## 特点
 
@@ -55,35 +55,34 @@ let kept: Vec<chunkedrs::OwnedChunk> = chunks.iter().map(|c| c.to_owned_chunk())
 
 ## 性能
 
-表中是切分一篇文档所用的毫秒数，取预热后 9 轮的中位数。测试环境：Apple M4 Pro 的 Mac mini，rustc 1.100，开启 LTO 的 release 构建，`TIKTOKEN_THREADS=1`，`o200k_base`，不重叠，2026-11-27。测试时机器上还有其他任务（期间平均负载 1.2 到 5.8），所以同一行的各列是紧接着依次测的。chunkedrs 3.0.0 和 2.2.0 是之前的两个版本，用的是同一个 tiktoken 5.7。text-splitter 的容量设为同样的 `max_tokens`，其余用默认值；它的代码切分用 tree-sitter-rust 0.24。
+表中是切分一篇文档所用的毫秒数：先取预热后 9 轮的中位数，再取 3 次测量的中位数。测试环境：Apple M6 的 Mac mini，rustc 1.100，开启 LTO 的 release 构建，`TIKTOKEN_THREADS=1`，`o200k_base`，不重叠，2026-11-27。测试期间平均负载在 1.1 到 2.2 之间。同一行的各列是紧接着依次测的。chunkedrs 3.1.0、3.0.0 和 2.2.0 是之前的版本，用的是同一个 tiktoken 5.7。text-splitter 的容量设为同样的 `max_tokens`，其余用默认值；它的代码切分用 tree-sitter-rust 0.24。
 
-| 语料 | 策略 | max_tokens | 一次 `encode` | chunkedrs 3.1 | chunkedrs 3.0.0 | chunkedrs 2.2.0 | text-splitter + tiktoken 5.7 | text-splitter + tiktoken-rs 0.12 |
-|---|---|--:|--:|--:|--:|--:|--:|--:|
-| book_en.txt | recursive | 512 | 0.117 | **0.189** | 0.226 | 0.354 | 1.187 | 34.80 |
-| book_en.txt | recursive | 128 | 0.116 | **0.251** | 0.308 | 0.428 | 2.456 | 64.88 |
-| zh_xiyouji.md | recursive | 512 | 0.149 | **0.233** | 0.269 | 0.453 | 0.495 | 20.06 |
-| zh_xiyouji.md | markdown | 512 | 0.149 | **0.253** | 0.286 | 0.517 | 1.035 | 40.27 |
-| zh_xiyouji.md | recursive | 128 | 0.146 | **0.345** | 0.389 | 0.622 | 1.433 | 29.88 |
-| zh_xiyouji.md | markdown | 128 | 0.146 | **0.373** | 0.417 | 0.629 | 1.980 | 42.86 |
-| ja_neko.txt | recursive | 512 | 0.076 | **0.148** | 0.184 | 0.271 | 0.762 | 46.18 |
-| ja_neko.txt | recursive | 128 | 0.078 | **0.276** | 0.307 | 0.392 | 2.017 | 65.24 |
-| md_rust_book.md | recursive | 512 | 0.101 | **0.169** | 0.206 | 0.312 | 0.735 | 22.20 |
-| md_rust_book.md | markdown | 512 | 0.101 | **0.222** | 0.257 | 0.416 | 1.188 | 25.19 |
-| md_rust_book.md | recursive | 128 | 0.101 | **0.218** | 0.266 | 0.361 | 0.920 | 21.74 |
-| md_rust_book.md | markdown | 128 | 0.101 | **0.296** | 0.336 | 0.514 | 1.773 | 33.53 |
-| code_rust.txt | recursive | 512 | 0.060 | **0.113** | 0.137 | 0.202 | 0.321 | 11.57 |
-| code_rust.txt | code | 512 | 0.060 | **0.120** | 0.144 | 0.207 | 6.769 | 34.45 |
-| code_rust.txt | recursive | 128 | 0.060 | **0.162** | 0.187 | 0.244 | 0.510 | 15.15 |
-| code_rust.txt | code | 128 | 0.060 | **0.202** | 0.232 | 0.288 | 7.707 | 61.53 |
+| 语料 | 策略 | max_tokens | 一次 `encode` | chunkedrs | chunkedrs 3.1.0 | chunkedrs 3.0.0 | chunkedrs 2.2.0 | text-splitter + tiktoken 5.7 | text-splitter + tiktoken-rs 0.12 |
+|---|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| book_en.txt | recursive | 512 | 0.089 | **0.130** | 0.140 | 0.160 | 0.254 | 0.933 | 24.64 |
+| book_en.txt | recursive | 128 | 0.092 | **0.164** | 0.182 | 0.202 | 0.300 | 1.981 | 46.01 |
+| zh_xiyouji.md | recursive | 512 | 0.093 | **0.140** | 0.142 | 0.162 | 0.263 | 0.361 | 14.88 |
+| zh_xiyouji.md | markdown | 512 | 0.093 | **0.147** | 0.156 | 0.176 | 0.283 | 0.800 | 30.03 |
+| zh_xiyouji.md | recursive | 128 | 0.093 | **0.209** | 0.224 | 0.243 | 0.358 | 1.100 | 22.54 |
+| zh_xiyouji.md | markdown | 128 | 0.093 | **0.220** | 0.243 | 0.261 | 0.392 | 1.512 | 32.42 |
+| ja_neko.txt | recursive | 512 | 0.054 | **0.093** | 0.103 | 0.120 | 0.173 | 0.586 | 35.72 |
+| ja_neko.txt | recursive | 128 | 0.054 | **0.157** | 0.179 | 0.197 | 0.243 | 1.542 | 49.89 |
+| md_rust_book.md | recursive | 512 | 0.079 | **0.115** | 0.126 | 0.145 | 0.226 | 0.586 | 15.97 |
+| md_rust_book.md | markdown | 512 | 0.079 | **0.145** | 0.160 | 0.183 | 0.299 | 0.921 | 18.21 |
+| md_rust_book.md | recursive | 128 | 0.079 | **0.150** | 0.161 | 0.182 | 0.260 | 0.695 | 15.74 |
+| md_rust_book.md | markdown | 128 | 0.079 | **0.187** | 0.212 | 0.234 | 0.360 | 1.366 | 24.14 |
+| code_rust.txt | recursive | 512 | 0.048 | **0.075** | 0.087 | 0.099 | 0.149 | 0.256 | 8.41 |
+| code_rust.txt | code | 512 | 0.048 | **0.076** | 0.093 | 0.104 | 0.155 | 4.866 | 24.65 |
+| code_rust.txt | recursive | 128 | 0.048 | **0.107** | 0.123 | 0.136 | 0.178 | 0.390 | 10.96 |
+| code_rust.txt | code | 128 | 0.048 | **0.115** | 0.149 | 0.161 | 0.203 | 5.696 | 44.34 |
 
 `book_en.txt` 是《傲慢与偏见》的 200,000 字节；`zh_xiyouji.md` 是 Wikisource 上《西游记》第 1 到 9 回，整理成 Markdown，共 178,622 字节；`ja_neko.txt` 是青空文库中夏目漱石《我是猫》的前 180,000 字节，去掉了注音；`md_rust_book.md` 是《The Rust Programming Language》第 3 到 6 章，共 174,237 字节；`code_rust.txt` 是 100,000 字节的 Rust 源码。这些文件都在 [`bench-compare/data`](bench-compare/data) 里。
 
 - 上表每一行的每个分块都用 tiktoken 重新数过，chunkedrs 和 text-splitter 都没有超出上限的分块
-- 用 recursive 策略、每块 512 token 时，chunkedrs 用时是对整篇文档做一次 `encode` 的 1.6 到 2.0 倍，每块 128 token 时最多 3.5 倍。它把文档编码一次，每个 token 的结束位置由编码器直接给出；数每个分块的 token 时，在分块中第一个和最后一个 tiktoken 切点之间直接用文档的 id，只重新编码两端；其余时间用于找边界和生成分块
-- 和 3.0.0 相比，每一行都少用 10% 到 20% 的时间；和 2.2.0 相比少用 30% 到 51%。三个版本切出的分块相同
-- 换成 `cl100k_base` 结果相近：0.11 到 0.48 ms，比 3.0.0 最多少用 22%。使用 tiktoken 默认的多线程时，这些文档的整篇编码会分到多个线程上，chunkedrs 用时 0.08 到 0.24 ms（3.0.0 是 0.11 到 0.30 ms）
-- 中文这几行在同一个构建的不同轮次之间波动最大。只测这份语料、再跑 5 轮：recursive 策略每块 128 token 时，`o200k_base` 比 3.0.0 少用 15% 到多用 9%（中位数少用 2%），`cl100k_base` 少用 0.4% 到 19%（中位数少用 8%）；每块 512 token 时，`o200k_base` 少用 0.4% 到 15%，中位数少用 6%
-- 用 `Chunker::split_batch` 处理 80 篇文档（5 份语料各 16 次，共 13.3 MB）：逐篇处理 18.2 ms，批量处理 2.5 ms
+- 每块 512 token 时，无论哪种策略，chunkedrs 用时都是对整篇文档做一次 `encode` 的 1.5 到 1.8 倍，每块 128 token 时是 1.8 到 2.9 倍。它把文档编码一次，每个 token 的结束位置由编码器直接给出；数每个分块的 token 时，在分块中第一个和最后一个 tiktoken 切点之间直接用文档的 id，只重新编码两端；其余时间用于找边界和生成分块
+- 和 3.1.0 相比少用 1% 到 23% 的时间。差得最少的是中文用 recursive 策略、每块 512 token 的那一行（1%），这一行的时间大部分就是编码本身；差得最多的是代码。和 2.2.0 相比少用 35% 到 52%。四个版本切出的分块相同
+- 换成 `cl100k_base` 结果相近：每块 512 token 时是一次 `encode` 的 1.4 到 1.9 倍（3.1.0 在日文上、以及用 markdown 策略切 Markdown 时最多 2.07 倍），比 3.1.0 少用 2% 到 24%。使用 tiktoken 默认的多线程时，这些文档的整篇编码会分到多个线程上，chunkedrs 用时 0.06 到 0.18 ms（3.1.0 是 0.07 到 0.21 ms）
+- 用 `Chunker::split_batch` 处理 80 篇文档（5 份语料各 16 次，共 13.3 MB）：逐篇处理 7.4 ms，批量处理 2.3 ms
 
 复现方法：`TIKTOKEN_THREADS=1 cargo run --release -p bench-compare`。
 
