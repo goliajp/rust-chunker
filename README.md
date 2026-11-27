@@ -11,7 +11,7 @@
 
 chunkedrs splits long documents into chunks that fit a token budget, for embedding and retrieval. It counts tokens with [tiktoken](https://crates.io/crates/tiktoken) (20 encodings: OpenAI, Llama, DeepSeek, Qwen, Mistral, Kimi, GLM, MiniMax). Every chunk is a slice of the document with its exact byte range and its token range in the document's token stream. It has no dependency besides tiktoken; the `semantic` feature adds [embedrs](https://crates.io/crates/embedrs), which itself has none.
 
-On an Apple M4 Pro, one thread, `o200k_base`, 512 tokens per chunk: a 200 KB English book splits in 0.19 ms, 1.6 times one `encode` of it. chunkedrs 3.0 took 0.23 ms and 2.2 took 0.35 ms; text-splitter 0.33.6 takes 1.19 ms on the same tokenizer and 34.8 ms with tiktoken-rs 0.12, the tokenizer its `tiktoken-rs` feature uses.
+On an Apple M6, one thread, `o200k_base`, 512 tokens per chunk: a 200 KB English book splits in 0.13 ms, 1.5 times one `encode` of it. chunkedrs 3.1 took 0.14 ms, 3.0 0.16 ms and 2.2 0.25 ms; text-splitter 0.33.6 takes 0.93 ms on the same tokenizer and 24.6 ms with tiktoken-rs 0.12, the tokenizer its `tiktoken-rs` feature uses.
 
 ## Highlights
 
@@ -55,35 +55,34 @@ let kept: Vec<chunkedrs::OwnedChunk> = chunks.iter().map(|c| c.to_owned_chunk())
 
 ## Performance
 
-Milliseconds per document, median of 9 rounds after warmup. Apple M4 Pro Mac mini, rustc 1.100, release with LTO, `TIKTOKEN_THREADS=1`, `o200k_base`, no overlap, 2026-11-27. Other jobs shared the machine (load average 1.2 to 5.8 during the run), so the columns of each row were measured one right after another. chunkedrs 3.0.0 and 2.2.0 are the two previous releases, on the same tiktoken 5.7. text-splitter gets the same `max_tokens` as its capacity and its defaults otherwise; its code splitter uses tree-sitter-rust 0.24.
+Milliseconds per document, median of 9 rounds after warmup, then the median of three runs. Apple M6 Mac mini, rustc 1.100, release with LTO, `TIKTOKEN_THREADS=1`, `o200k_base`, no overlap, 2026-11-27; the load average stayed between 1.1 and 2.2. The columns of each row were measured one right after another. chunkedrs 3.1.0, 3.0.0 and 2.2.0 are the previous releases, on the same tiktoken 5.7. text-splitter gets the same `max_tokens` as its capacity and its defaults otherwise; its code splitter uses tree-sitter-rust 0.24.
 
-| corpus | strategy | max_tokens | one `encode` | chunkedrs 3.1 | chunkedrs 3.0.0 | chunkedrs 2.2.0 | text-splitter + tiktoken 5.7 | text-splitter + tiktoken-rs 0.12 |
-|---|---|--:|--:|--:|--:|--:|--:|--:|
-| book_en.txt | recursive | 512 | 0.117 | **0.189** | 0.226 | 0.354 | 1.187 | 34.80 |
-| book_en.txt | recursive | 128 | 0.116 | **0.251** | 0.308 | 0.428 | 2.456 | 64.88 |
-| zh_xiyouji.md | recursive | 512 | 0.149 | **0.233** | 0.269 | 0.453 | 0.495 | 20.06 |
-| zh_xiyouji.md | markdown | 512 | 0.149 | **0.253** | 0.286 | 0.517 | 1.035 | 40.27 |
-| zh_xiyouji.md | recursive | 128 | 0.146 | **0.345** | 0.389 | 0.622 | 1.433 | 29.88 |
-| zh_xiyouji.md | markdown | 128 | 0.146 | **0.373** | 0.417 | 0.629 | 1.980 | 42.86 |
-| ja_neko.txt | recursive | 512 | 0.076 | **0.148** | 0.184 | 0.271 | 0.762 | 46.18 |
-| ja_neko.txt | recursive | 128 | 0.078 | **0.276** | 0.307 | 0.392 | 2.017 | 65.24 |
-| md_rust_book.md | recursive | 512 | 0.101 | **0.169** | 0.206 | 0.312 | 0.735 | 22.20 |
-| md_rust_book.md | markdown | 512 | 0.101 | **0.222** | 0.257 | 0.416 | 1.188 | 25.19 |
-| md_rust_book.md | recursive | 128 | 0.101 | **0.218** | 0.266 | 0.361 | 0.920 | 21.74 |
-| md_rust_book.md | markdown | 128 | 0.101 | **0.296** | 0.336 | 0.514 | 1.773 | 33.53 |
-| code_rust.txt | recursive | 512 | 0.060 | **0.113** | 0.137 | 0.202 | 0.321 | 11.57 |
-| code_rust.txt | code | 512 | 0.060 | **0.120** | 0.144 | 0.207 | 6.769 | 34.45 |
-| code_rust.txt | recursive | 128 | 0.060 | **0.162** | 0.187 | 0.244 | 0.510 | 15.15 |
-| code_rust.txt | code | 128 | 0.060 | **0.202** | 0.232 | 0.288 | 7.707 | 61.53 |
+| corpus | strategy | max_tokens | one `encode` | chunkedrs | chunkedrs 3.1.0 | chunkedrs 3.0.0 | chunkedrs 2.2.0 | text-splitter + tiktoken 5.7 | text-splitter + tiktoken-rs 0.12 |
+|---|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| book_en.txt | recursive | 512 | 0.089 | **0.130** | 0.140 | 0.160 | 0.254 | 0.933 | 24.64 |
+| book_en.txt | recursive | 128 | 0.092 | **0.164** | 0.182 | 0.202 | 0.300 | 1.981 | 46.01 |
+| zh_xiyouji.md | recursive | 512 | 0.093 | **0.140** | 0.142 | 0.162 | 0.263 | 0.361 | 14.88 |
+| zh_xiyouji.md | markdown | 512 | 0.093 | **0.147** | 0.156 | 0.176 | 0.283 | 0.800 | 30.03 |
+| zh_xiyouji.md | recursive | 128 | 0.093 | **0.209** | 0.224 | 0.243 | 0.358 | 1.100 | 22.54 |
+| zh_xiyouji.md | markdown | 128 | 0.093 | **0.220** | 0.243 | 0.261 | 0.392 | 1.512 | 32.42 |
+| ja_neko.txt | recursive | 512 | 0.054 | **0.093** | 0.103 | 0.120 | 0.173 | 0.586 | 35.72 |
+| ja_neko.txt | recursive | 128 | 0.054 | **0.157** | 0.179 | 0.197 | 0.243 | 1.542 | 49.89 |
+| md_rust_book.md | recursive | 512 | 0.079 | **0.115** | 0.126 | 0.145 | 0.226 | 0.586 | 15.97 |
+| md_rust_book.md | markdown | 512 | 0.079 | **0.145** | 0.160 | 0.183 | 0.299 | 0.921 | 18.21 |
+| md_rust_book.md | recursive | 128 | 0.079 | **0.150** | 0.161 | 0.182 | 0.260 | 0.695 | 15.74 |
+| md_rust_book.md | markdown | 128 | 0.079 | **0.187** | 0.212 | 0.234 | 0.360 | 1.366 | 24.14 |
+| code_rust.txt | recursive | 512 | 0.048 | **0.075** | 0.087 | 0.099 | 0.149 | 0.256 | 8.41 |
+| code_rust.txt | code | 512 | 0.048 | **0.076** | 0.093 | 0.104 | 0.155 | 4.866 | 24.65 |
+| code_rust.txt | recursive | 128 | 0.048 | **0.107** | 0.123 | 0.136 | 0.178 | 0.390 | 10.96 |
+| code_rust.txt | code | 128 | 0.048 | **0.115** | 0.149 | 0.161 | 0.203 | 5.696 | 44.34 |
 
 `book_en.txt` is 200,000 bytes of *Pride and Prejudice*, `zh_xiyouji.md` 178,622 bytes of *Journey to the West* chapters 1-9 in markdown (Wikisource), `ja_neko.txt` the first 180,000 bytes of Natsume Sōseki's *I Am a Cat* (Aozora Bunko, ruby removed), `md_rust_book.md` 174,237 bytes of *The Rust Programming Language* chapters 3-6, `code_rust.txt` 100,000 bytes of Rust source. All are in [`bench-compare/data`](bench-compare/data).
 
 - Every chunk of every row above was recounted with tiktoken: none is over budget, for chunkedrs or text-splitter.
-- chunkedrs takes 1.6 to 2.0 times one `encode` of the document with the recursive strategy at 512 tokens, and up to 3.5 times at 128. It encodes the document once, with each token's end offset from the encoder, and counts each chunk by reusing the document's ids between the chunk's first and last tiktoken cut position, encoding only the two ends again; finding boundaries and building chunks is the rest.
-- Against 3.0.0: 10 to 20% less time on every row; against 2.2.0: 30 to 51% less. All three give the same chunks.
-- `cl100k_base` gives a similar picture: 0.11 to 0.48 ms, up to 22% less than 3.0.0. With tiktoken's default threads, the whole-document encode of these texts runs on several threads and chunkedrs takes 0.08 to 0.24 ms (3.0.0: 0.11 to 0.30 ms).
-- The Chinese rows vary the most between runs of the same build. In five more runs of only that corpus, the recursive strategy at 128 tokens took 15% less to 9% more time than 3.0.0 with `o200k_base` (median 2% less) and 0.4% to 19% less with `cl100k_base` (median 8% less); at 512 tokens 0.4% to 15% less with `o200k_base` (median 6% less).
-- `Chunker::split_batch` on 80 documents (the five corpora 16 times, 13.3 MB): 18.2 ms one after another, 2.5 ms as a batch.
+- At 512 tokens chunkedrs takes 1.5 to 1.8 times one `encode` of the document, whatever the strategy, and 1.8 to 2.9 times at 128. It encodes the document once, with each token's end offset from the encoder, and counts each chunk by reusing the document's ids between the chunk's first and last tiktoken cut position, encoding only the two ends again; finding boundaries and building chunks is the rest.
+- Against 3.1.0: 1 to 23% less time; least on Chinese with the recursive strategy at 512 tokens (1%), whose time is mostly the encode itself, most on code. Against 2.2.0: 35 to 52% less. All four give the same chunks.
+- `cl100k_base` gives a similar picture: 1.4 to 1.9 times one `encode` at 512 tokens (3.1.0: up to 2.07 times, on Japanese and on Markdown with the markdown strategy) and 2 to 24% less time than 3.1.0. With tiktoken's default threads, the whole-document encode of these texts runs on several threads and chunkedrs takes 0.06 to 0.18 ms (3.1.0: 0.07 to 0.21 ms).
+- `Chunker::split_batch` on 80 documents (the five corpora 16 times, 13.3 MB): 7.4 ms one after another, 2.3 ms as a batch.
 
 Reproduce with `TIKTOKEN_THREADS=1 cargo run --release -p bench-compare`.
 

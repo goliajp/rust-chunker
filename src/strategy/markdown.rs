@@ -19,7 +19,7 @@ pub(crate) fn split_markdown<'a>(
 ) -> Vec<Chunk<'a>> {
     let ladder = tiers(TEXT_TIERS);
     let mut chunks = Vec::new();
-    for section in extract_sections(doc.text) {
+    for section in extract_sections(doc.text, &doc.newlines) {
         let start = section.byte_offset;
         let end = start + section.content.len();
         for piece in plan(doc, start, end, &ladder, max_tokens, overlap) {
@@ -53,8 +53,31 @@ struct Section<'a> {
     byte_offset: usize,
 }
 
+/// The lines of `text`, each with its `\n`, as `split_inclusive('\n')` gives
+/// them; `newlines` are the offsets of every `\n` in `text`.
+struct Lines<'a, 'n> {
+    text: &'a str,
+    newlines: std::slice::Iter<'n, usize>,
+    at: usize,
+}
+
+impl<'a> Iterator for Lines<'a, '_> {
+    type Item = &'a str;
+
+    #[inline]
+    fn next(&mut self) -> Option<&'a str> {
+        if self.at >= self.text.len() {
+            return None;
+        }
+        let end = self.newlines.next().map_or(self.text.len(), |&p| p + 1);
+        let line = &self.text[self.at..end];
+        self.at = end;
+        Some(line)
+    }
+}
+
 /// extract markdown sections with their header ancestry
-fn extract_sections(text: &str) -> Vec<Section<'_>> {
+fn extract_sections<'a>(text: &'a str, newlines: &[usize]) -> Vec<Section<'a>> {
     let front_matter_end = front_matter_end(text);
 
     let mut sections: Vec<Section> = Vec::new();
@@ -65,7 +88,12 @@ fn extract_sections(text: &str) -> Vec<Section<'_>> {
     // byte range of the body collected since the last header
     let mut current: Option<(usize, usize)> = None;
     let mut fence: Option<Fence> = None;
-    let mut lines = text.split_inclusive('\n').peekable();
+    let mut lines = Lines {
+        text,
+        newlines: newlines.iter(),
+        at: 0,
+    }
+    .peekable();
 
     while let Some(line) = lines.next() {
         let body = line.trim_start();
@@ -224,6 +252,7 @@ fn front_matter_end(text: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plan::newlines;
 
     fn encoder() -> &'static tiktoken::CoreBpe {
         tiktoken::get_encoding("o200k_base").unwrap()
@@ -330,7 +359,7 @@ mod tests {
     #[test]
     fn extract_sections_skips_fenced_content() {
         let text = "# Title\ntext\n```\n# fake\n```\nmore\n";
-        let sections = extract_sections(text);
+        let sections = extract_sections(text, &newlines(text));
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].path.last().copied(), Some("# Title"));
         assert!(
@@ -342,7 +371,7 @@ mod tests {
     #[test]
     fn extract_sections_setext() {
         let text = "Title\n=====\nbody\n";
-        let sections = extract_sections(text);
+        let sections = extract_sections(text, &newlines(text));
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].path.last().copied(), Some("Title"));
         assert_eq!(sections[0].content, "body\n");
@@ -351,7 +380,7 @@ mod tests {
     #[test]
     fn extract_sections_basic() {
         let text = "# Title\nSome intro.\n## Section A\nContent A.\n## Section B\nContent B.\n";
-        let sections = extract_sections(text);
+        let sections = extract_sections(text, &newlines(text));
         assert_eq!(sections.len(), 3);
         assert_eq!(sections[0].path.last().copied(), Some("# Title"));
         assert!(sections[0].content.contains("Some intro."));
@@ -362,7 +391,7 @@ mod tests {
     #[test]
     fn extract_sections_no_headers() {
         let text = "Just plain text\nwith lines\nand more.";
-        let sections = extract_sections(text);
+        let sections = extract_sections(text, &newlines(text));
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].path.last(), None);
         assert_eq!(sections[0].content, text);

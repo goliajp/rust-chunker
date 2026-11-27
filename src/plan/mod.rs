@@ -12,6 +12,8 @@ mod scan;
 mod verify;
 
 use crate::Chunk;
+#[cfg(test)]
+pub(crate) use scan::newlines;
 use scan::{Matcher, Scan};
 use tiktoken::CoreBpe;
 
@@ -25,6 +27,9 @@ pub(crate) struct Doc<'a> {
     /// entry is the text length. A token can end inside a multi-byte
     /// character, so an entry is not always a char boundary.
     bounds: Vec<usize>,
+    /// Offset of every `\n` in the text, ascending: every newline tier and
+    /// the markdown line walk read this instead of searching the text again.
+    pub newlines: Vec<usize>,
 }
 
 impl<'a> Doc<'a> {
@@ -37,6 +42,7 @@ impl<'a> Doc<'a> {
             encoder,
             tokens,
             bounds,
+            newlines: scan::newlines(text),
         }
     }
 
@@ -217,7 +223,7 @@ pub(crate) fn plan(
     let scans = tiers
         .iter()
         .map(|t| match t {
-            Tier::Seps(matcher) => Scan::seps(matcher, lo),
+            Tier::Seps(matcher) => Scan::seps(matcher, lo, &doc.newlines),
             Tier::Cuts(cuts) => Scan::fixed(cuts, lo, hi),
         })
         .collect();
