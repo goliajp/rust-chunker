@@ -88,8 +88,9 @@ impl<'m> Scan<'m> {
             matcher,
             cuts: Vec::new(),
             pos: lo,
+            // a section of a longer document starts its walk at its own start
+            next: newlines.partition_point(|&p| p < lo),
             newlines,
-            next: 0,
         }
     }
 
