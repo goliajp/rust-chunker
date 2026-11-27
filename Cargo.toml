@@ -69,6 +69,9 @@ vocab-minimax_m2 = ["tiktoken/vocab-minimax_m2"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# the previous release, for the differential test; its default features off
+# so that it adds no vocabulary to a slim test build
+chunkedrs_3 = { package = "chunkedrs", version = "=3.0.0", default-features = false }
 # the semantic tests run a real model on the CPU, no API key
 embedrs = { version = "0.7", features = ["local"] }
 
