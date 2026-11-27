@@ -18,9 +18,11 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 chunkedrs = { path = "..", default-features = false, features = ["vocab-cl100k_base", "vocab-qwen3_5", "vocab-llama3", "vocab-glm5"] }
+# the previous release, for the timing table
+chunkedrs30 = { package = "chunkedrs", version = "=3.0.0", default-features = false, features = ["vocab-cl100k_base", "vocab-qwen3_5", "vocab-llama3", "vocab-glm5"] }
 # the release before 3.0, for the timing table and the differential test
 chunkedrs22 = { package = "chunkedrs", version = "=2.2.0", default-features = false, features = ["vocab-cl100k_base", "vocab-qwen3_5", "vocab-llama3", "vocab-glm5"] }
-tiktoken = { version = "5.6", default-features = false, features = ["vocab-o200k_base", "vocab-cl100k_base"] }
+tiktoken = { version = "5.7", default-features = false, features = ["vocab-o200k_base", "vocab-cl100k_base"] }
 tiktoken-rs = "=0.12.1"
 text-splitter = { version = "=0.33.6", features = ["tiktoken-rs", "markdown", "code"] }
 tree-sitter-rust = "0.24"
