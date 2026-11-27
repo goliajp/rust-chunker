@@ -18,7 +18,9 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 chunkedrs = { path = "..", default-features = false, features = ["vocab-cl100k_base", "vocab-qwen3_5", "vocab-llama3", "vocab-glm5"] }
-# the previous release, for the timing table
+# the previous releases, for the timing table; 3.1.0 from its tag, since
+# cargo takes one 3.x release of a crate from crates.io
+chunkedrs31 = { package = "chunkedrs", git = "https://github.com/goliajp/rust-chunker", tag = "v3.1.0", default-features = false, features = ["vocab-cl100k_base", "vocab-qwen3_5", "vocab-llama3", "vocab-glm5"] }
 chunkedrs30 = { package = "chunkedrs", version = "=3.0.0", default-features = false, features = ["vocab-cl100k_base", "vocab-qwen3_5", "vocab-llama3", "vocab-glm5"] }
 # the release before 3.0, for the timing table and the differential test
 chunkedrs22 = { package = "chunkedrs", version = "=2.2.0", default-features = false, features = ["vocab-cl100k_base", "vocab-qwen3_5", "vocab-llama3", "vocab-glm5"] }

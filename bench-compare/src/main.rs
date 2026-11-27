@@ -75,6 +75,16 @@ fn contents<'t>(chunks: Vec<chunkedrs::Chunk<'t>>) -> Vec<&'t str> {
     chunks.into_iter().map(|c| c.content).collect()
 }
 
+fn chunked31(enc: &str, max: usize) -> chunkedrs31::Chunker {
+    chunkedrs31::Chunker::for_encoding(enc)
+        .unwrap()
+        .max_tokens(max)
+}
+
+fn contents31<'t>(chunks: Vec<chunkedrs31::Chunk<'t>>) -> Vec<&'t str> {
+    chunks.into_iter().map(|c| c.content).collect()
+}
+
 fn chunked30(enc: &str, max: usize) -> chunkedrs30::Chunker {
     chunkedrs30::Chunker::for_encoding(enc)
         .unwrap()
@@ -117,6 +127,10 @@ fn candidates(corpus: &str, enc_name: &'static str, max: usize) -> Vec<(&'static
             Box::new(move |t| contents(chunked(enc_name, max).split(t))),
         ),
         (
+            "chunkedrs 3.1.0",
+            Box::new(move |t| contents31(chunked31(enc_name, max).split(t))),
+        ),
+        (
             "chunkedrs 3.0.0",
             Box::new(move |t| contents30(chunked30(enc_name, max).split(t))),
         ),
@@ -139,6 +153,10 @@ fn candidates(corpus: &str, enc_name: &'static str, max: usize) -> Vec<(&'static
             Box::new(move |t| contents(chunked(enc_name, max).markdown().split(t))),
         ));
         out.push((
+            "chunkedrs 3.1.0 markdown",
+            Box::new(move |t| contents31(chunked31(enc_name, max).markdown().split(t))),
+        ));
+        out.push((
             "chunkedrs 3.0.0 markdown",
             Box::new(move |t| contents30(chunked30(enc_name, max).markdown().split(t))),
         ));
@@ -159,6 +177,10 @@ fn candidates(corpus: &str, enc_name: &'static str, max: usize) -> Vec<(&'static
         out.push((
             "chunkedrs code",
             Box::new(move |t| contents(chunked(enc_name, max).code().split(t))),
+        ));
+        out.push((
+            "chunkedrs 3.1.0 code",
+            Box::new(move |t| contents31(chunked31(enc_name, max).code().split(t))),
         ));
         out.push((
             "chunkedrs 3.0.0 code",
